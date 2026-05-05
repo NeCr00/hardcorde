@@ -8,5 +8,5 @@ and false-positive reduction.
 For use in authorized internal penetration tests and legal lab environments only.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 __author__ = "hardcorde"

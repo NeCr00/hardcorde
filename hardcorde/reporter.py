@@ -16,9 +16,11 @@ import sys
 from datetime import datetime, timezone
 from typing import TextIO
 try:
+    from . import __version__
     from .analyzer import Finding
     from .rules import Severity
 except ImportError:
+    from hardcorde import __version__
     from hardcorde.analyzer import Finding
     from hardcorde.rules import Severity
 
@@ -107,8 +109,11 @@ class TerminalReporter:
         # Line 1: index, severity, rule name
         self._write(f"  [{index}] {sev_label} "
                      f"{_c(Colors.BOLD, finding.rule_name, self.use_color)}\n")
-        # Line 2: file:line (compact, easy to copy)
-        self._write(f"      {finding.file_path}:{finding.line_number}\n")
+        # Line 2: file (with line number when applicable)
+        if finding.line_number > 0:
+            self._write(f"      {finding.file_path}:{finding.line_number}\n")
+        else:
+            self._write(f"      {finding.file_path}\n")
         # Line 3: secret value (always full — no masking)
         self._write(f"      Secret:     {_c(Colors.YELLOW, finding.secret_value, self.use_color)}\n")
         # Line 4: confidence bar
@@ -129,8 +134,8 @@ class TerminalReporter:
                 self._write(_c(Colors.DIM,
                                f"      Scoring: base=50, {parts}\n", self.use_color))
 
-        # Context: trimmed lines only
-        if self.show_context:
+        # Context: trimmed lines only (skip for filename-only matches)
+        if self.show_context and finding.line_content:
             for ctx in finding.context_before:
                 self._write(_c(Colors.DIM, f"        | {ctx}\n", self.use_color))
             self._write(_c(Colors.YELLOW,
@@ -196,7 +201,7 @@ class JSONReporter:
         filtered = [f for f in findings if f.confidence >= self.min_confidence]
         output = {
             "tool": "hardcorde",
-            "version": "1.0.0",
+            "version": __version__,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "target": target,
             "files_scanned": total_files,
@@ -250,6 +255,116 @@ class CSVReporter:
                 f.confidence, round(f.entropy, 3),
                 ";".join(f.tags),
             ])
+
+
+class SARIFReporter:
+    """
+    SARIF 2.1.0 output for ingestion by GitHub Code Scanning, Azure
+    DevOps, DefectDojo, and other security pipelines.
+    """
+
+    SARIF_LEVEL = {
+        "critical": "error",
+        "high":     "error",
+        "medium":   "warning",
+        "low":      "note",
+        "info":     "note",
+    }
+
+    def __init__(self, stream: TextIO = None,
+                 min_confidence: int = 0, indent: int = 2):
+        self.stream = stream or sys.stdout
+        self.min_confidence = min_confidence
+        self.indent = indent
+
+    def report(self, findings: list[Finding], target: str, total_files: int):
+        filtered = [f for f in findings if f.confidence >= self.min_confidence]
+
+        # Build a unique rule list for the run from the findings encountered
+        rules_seen: dict[str, dict] = {}
+        for f in filtered:
+            if f.rule_id in rules_seen:
+                continue
+            rules_seen[f.rule_id] = {
+                "id": f.rule_id,
+                "name": f.rule_name,
+                "shortDescription": {"text": f.rule_name},
+                "fullDescription": {"text": f.description or f.rule_name},
+                "defaultConfiguration": {
+                    "level": self.SARIF_LEVEL.get(f.severity, "warning"),
+                },
+                "properties": {
+                    "category": f.category,
+                    "tags": f.tags,
+                    "security-severity": self._security_severity(f.severity),
+                },
+            }
+
+        results = []
+        for f in filtered:
+            uri = f.file_path.replace("\\", "/")
+            region = {"startLine": max(1, f.line_number)}
+            if f.line_content:
+                region["snippet"] = {"text": f.line_content}
+            result = {
+                "ruleId": f.rule_id,
+                "level": self.SARIF_LEVEL.get(f.severity, "warning"),
+                "message": {
+                    "text": f"{f.rule_name}: {f.description}"
+                },
+                "locations": [{
+                    "physicalLocation": {
+                        "artifactLocation": {"uri": uri},
+                        "region": region,
+                    }
+                }],
+                "properties": {
+                    "confidence": f.confidence,
+                    "entropy": round(f.entropy, 3),
+                    "category": f.category,
+                    "severity": f.severity,
+                    "tags": f.tags,
+                    "secret": f.secret_value,
+                },
+            }
+            results.append(result)
+
+        sarif = {
+            "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+            "version": "2.1.0",
+            "runs": [{
+                "tool": {
+                    "driver": {
+                        "name": "hardcorde",
+                        "version": __version__,
+                        "informationUri": "https://github.com/yourusername/hardcorde",
+                        "rules": list(rules_seen.values()),
+                    }
+                },
+                "invocations": [{
+                    "executionSuccessful": True,
+                    "endTimeUtc": datetime.now(timezone.utc).isoformat(),
+                    "properties": {
+                        "target": target,
+                        "files_scanned": total_files,
+                    },
+                }],
+                "results": results,
+            }],
+        }
+        json.dump(sarif, self.stream, indent=self.indent, ensure_ascii=False)
+        self.stream.write("\n")
+
+    @staticmethod
+    def _security_severity(sev: str) -> str:
+        # Maps to GitHub Code Scanning's 0.0–10.0 score
+        return {
+            "critical": "9.5",
+            "high":     "8.0",
+            "medium":   "5.5",
+            "low":      "3.0",
+            "info":     "1.0",
+        }.get(sev, "5.0")
 
 
 class HTMLReporter:
