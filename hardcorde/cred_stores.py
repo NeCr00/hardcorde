@@ -20,7 +20,7 @@ report/output pipeline as content-based detections.
 import os
 import re
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Generator, Iterable, Optional
@@ -39,6 +39,12 @@ except ImportError:
 
 # ── Known password-manager / credential-vault extensions ──────────────
 # Mapped to a human-readable store type and base severity.
+#
+# Only include extensions that are *specific* to a vault / credential
+# format. Generic extensions like .dat, .key, .enc are NOT included here —
+# they have too many other uses (game saves, TLS keys, miscellaneous
+# encrypted blobs) and would generate noise. Such files surface via the
+# filename-pattern check or content scan instead.
 CRED_STORE_EXTENSIONS: dict[str, tuple[str, str]] = {
     # KeePass family
     ".kdbx": ("KeePass 2 database", "critical"),
@@ -53,6 +59,10 @@ CRED_STORE_EXTENSIONS: dict[str, tuple[str, str]] = {
     # Apple Keychain
     ".keychain":     ("Apple Keychain", "critical"),
     ".keychain-db":  ("Apple Keychain database", "critical"),
+    # PuTTY private key (often the only key on Windows boxes)
+    ".ppk":      ("PuTTY private key (may be passphrase-protected)", "critical"),
+    # age-encrypted files (modern, format-specific)
+    ".age":      ("age-encrypted file", "high"),
     # Misc password manager / wallet formats
     ".bkp":      ("Generic password-manager backup", "high"),
     ".fsk":      ("F-Secure Key vault", "high"),
@@ -68,21 +78,62 @@ CRED_STORE_EXTENSIONS: dict[str, tuple[str, str]] = {
 # Each keyword is matched as a separate token: `[._\-/\\\b]keyword[._\-/\\\b]`
 # Multi-word keys (`api_key`, `private_key`) match the literal token; the
 # regex builder handles word boundaries.
+#
+# Keep this list TIGHT — every keyword fires on every basename in the tree.
+# Adding `key`, `pass`, `user` alone would generate enormous noise.
 _SECRET_KEYWORDS: list[str] = [
-    "password", "passwords", "passwd", "pwd",
+    # Password family
+    "password", "passwords", "passwd", "pwd", "passphrase",
+    # Secret family
     "secret", "secrets",
-    "credential", "credentials", "creds",
+    # Credentials
+    "credential", "credentials", "creds", "cred",
+    # API keys
     "apikey", "apikeys", "api_key", "api_keys", "api-key", "api-keys",
-    "token", "tokens",
-    "auth",
-    "private_key", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
-    "htpasswd", "shadow",
+    # Tokens
+    "token", "tokens", "accesstoken", "access_token", "access-token",
+    "refreshtoken", "refresh_token", "refresh-token",
+    "bearer",
+    # Auth
+    "auth", "authkey", "auth_key", "auth-key",
+    # Keys (private / SSH / GPG)
+    "private_key", "privatekey", "private-key",
+    "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
+    "id_rsa.pub", "id_ecdsa.pub", "id_ed25519.pub",
+    "ssh_host", "ssh-host",
+    # System auth files
+    "htpasswd", "htdigest", "shadow", "passwd",
+    "smbpasswd", "vncpasswd", "afppasswd", "master.passwd",
+    # Vault / wallet / keystore
     "vault", "vaults", "keystore", "keystores",
     "keyring", "keyrings", "wallet", "wallets",
+    "keychain", "keychains",
+    # OAuth client info
+    "clientsecret", "client_secret", "client-secret",
+    "clientid", "client_id", "client-id",
+    # Cloud-specific
+    "serviceaccount", "service_account", "service-account",
+    "kubeconfig", "kubectl",
+    # CTF / pentest evergreens
+    "userlist", "user_list", "user-list",
+    "pwdlist", "passlist", "pass_list", "pass-list",
+    # Mnemonic / wallet recovery
+    "mnemonic", "seedphrase", "seed_phrase", "seed-phrase",
+    "recoveryphrase", "recovery_phrase", "recovery-phrase",
 ]
 
-# "backup" / "dump" only flag when combined with one of the above
-_QUALIFIED_KEYWORDS: list[str] = ["backup", "dump"]
+# These keywords only flag when combined with a primary one.
+# `backup`, `dump`, `export`, `archive`, `snapshot` are common enough that
+# without a primary co-occurrence they would fire on every random dump.
+_QUALIFIED_KEYWORDS: list[str] = [
+    "backup", "bkp",
+    "dump", "dmp",
+    "export", "exports",
+    "archive", "archived",
+    "snapshot", "snap",
+    "leak", "leaked",
+    "old", "orig", "save",
+]
 
 
 def _build_keyword_regex(keywords: Iterable[str]) -> re.Pattern:
@@ -139,7 +190,7 @@ class StoreHit:
     extension: str
     kind: str            # "cred_store" or "filename_pattern"
     store_type: str = ""             # for cred_store: human-readable store
-    keywords: list[str] = None       # for filename_pattern: keywords matched
+    keywords: list[str] = field(default_factory=list)  # filename keywords
     severity: str = "high"
 
 

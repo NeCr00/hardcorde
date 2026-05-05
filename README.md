@@ -13,7 +13,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/python-3.9+-blue?style=flat-square" alt="Python">
   <img src="https://img.shields.io/badge/platform-windows%20%7C%20linux%20%7C%20macos-lightgrey?style=flat-square" alt="Platform">
-  <img src="https://img.shields.io/badge/rules-103-orange?style=flat-square" alt="Rules">
+  <img src="https://img.shields.io/badge/rules-125-orange?style=flat-square" alt="Rules">
   <img src="https://img.shields.io/badge/dependencies-0-green?style=flat-square" alt="Dependencies">
   <img src="https://img.shields.io/badge/license-MIT-yellow?style=flat-square" alt="License">
 </p>
@@ -125,17 +125,21 @@ Each check is enabled out of the box. Disable with the matching `--no-*` flag.
 
 Used by the recursive content scan. Override with `--ext`, extend with `--add-ext`.
 
-* **Plain-text / config / data** — `.txt .log .csv .tsv .ini .conf .config .cfg .cnf .env .properties .props .xml .json .yaml .yml .toml .sql`
-* **Scripting / source** — `.ps1 .psm1 .psd1 .bat .cmd .vbs .vbe .js .jse .wsf .hta .py .pl .rb .php .asp .aspx .jsp .jspx .cfm .sh .ksh .bash` (plus `.zsh .fish .ts .go .java .cs .cpp .c .h .hpp .rs .swift .kt .groovy .scala .lua`)
-* **Windows-specific** — `.reg .rdp .ica .pubxml .publishsettings .udl .dsn .ftpconfig .unattend .inf .gpp .sln .csproj .user`
-* **Backup / leftover artifacts** — `.bak .backup .old .orig .save .tmp`
-* **Certs / keys** — `.pem .key .crt .cer .csr .p12 .pfx .jks .keystore .pub`
+* **Plain-text / config / data** — `.txt .log .csv .tsv .md .ini .conf .config .cfg .cnf .env .envrc .properties .props .targets .xml .json .json5 .jsonc .yaml .yml .toml .plist .sql`
+* **IaC / templating** — `.hcl .tf .tfvars .tfvars.json .tfstate .tfstate.backup .tftpl .tfplan .j2 .jinja .jinja2 .tpl .tmpl .liquid .mustache`
+* **Scripting / source** — `.ps1 .psm1 .psd1 .bat .cmd .vbs .vbe .vbscript .wsf .hta .py .pyw .pl .pm .rb .php .php3 .phtml .phar .js .jsx .mjs .cjs .ts .tsx .go .java .kts .cs .vb .fs .fsx .cpp .cc .c .h .hpp .rs .swift .kt .m .mm .groovy .gradle .scala .sbt .lua .r .R .dart .ex .exs .erl .clj .tcl .awk .ksh .csh .tcsh .sh .bash .zsh .fish`
+* **Web** — `.html .htm .xhtml .asp .aspx .ascx .cshtml .razor .master .jsp .jspx .cfm .ejs .twig .erb .hbs .handlebars .vue .svelte .astro .htaccess .htdigest`
+* **Windows-specific** — `.reg .rdp .ica .pubxml .publishsettings .udl .dsn .ftpconfig .unattend .inf .gpp .sln .csproj .vcxproj .vbproj .fsproj .user .vcxproj.user .cscfg`
+* **Auth-shaped files** — `.pwd .pass .passwd .password .cred .creds .credential .credentials .secret .secrets .htpasswd .htdigest`
+* **Data / reports** — `.dump .dmp .har .eml .mbox .graphql .gql .proto`
+* **Backup / leftover artifacts** — `.bak .bkp .old .orig .save .swp .swo .tmp .temp .cache .backup .bk .copy .prev`
+* **Certs / keys** — `.pem .key .crt .cer .csr .p12 .pfx .jks .keystore .pub .asc .gpg .ppk .ovpn .kbx`
 
 ## Credential-store file extensions
 
 Detected by Check 3 (`--cred-stores`). Files are flagged by extension only — the tool never tries to open or crack them.
 
-`.kdbx` `.kdb` (KeePass) · `.psafe3` (Password Safe) · `.agilekeychain` `.opvault` `.1pif` `.1pux` (1Password) · `.keychain` `.keychain-db` (Apple Keychain) · `.bkp` `.fsk` `.rfx` `.spdb` (misc password managers) · `.walletx` (Bitwarden export variants) · `.mlb` (mSecure) · `.dashlane` (Dashlane)
+`.kdbx` `.kdb` (KeePass) · `.psafe3` (Password Safe) · `.agilekeychain` `.opvault` `.1pif` `.1pux` (1Password) · `.keychain` `.keychain-db` (Apple Keychain) · `.ppk` (PuTTY private key) · `.age` (age-encrypted file) · `.bkp` `.fsk` `.rfx` `.spdb` (misc password managers) · `.walletx` (Bitwarden export variants) · `.mlb` (mSecure) · `.dashlane` (Dashlane)
 
 Each hit reports full path, file size, last-modified time, and the matched store type.
 
@@ -143,9 +147,13 @@ Each hit reports full path, file size, last-modified time, and the matched store
 
 Detected by Check 4 (`--filename-patterns`). Case-insensitive, matched as a token (`/`, `\`, `.`, `_`, `-`, or string boundary on each side).
 
-`password` / `passwords` · `passwd` · `pwd` · `secret` / `secrets` · `credential` / `credentials` / `creds` · `apikey` / `api_key` / `api-key` · `token` · `auth` · `private_key` · `id_rsa` · `id_dsa` · `id_ecdsa` · `id_ed25519` · `htpasswd` · `shadow` · `vault` · `keystore` · `keyring` · `wallet`
+**Primary** (any of these alone trigger a finding):
+`password` / `passwords` · `passwd` · `pwd` · `passphrase` · `secret` / `secrets` · `credential` / `credentials` / `creds` / `cred` · `apikey` / `api_key` / `api-key` · `token` / `accesstoken` / `refreshtoken` · `bearer` · `auth` / `authkey` · `private_key` / `privatekey` · `id_rsa` · `id_dsa` · `id_ecdsa` · `id_ed25519` · `htpasswd` · `htdigest` · `shadow` · `smbpasswd` · `vncpasswd` · `vault` · `keystore` · `keyring` · `wallet` · `keychain` · `client_secret` / `clientsecret` · `service_account` · `kubeconfig` · `userlist` / `pwdlist` · `mnemonic` / `seedphrase` / `recovery_phrase`
 
-`backup` and `dump` are *qualified* keywords — they only fire when at least one of the primary keywords also hits the same name. So `db_dump.sql` alone is silent, but `passwords_backup.txt` flags both.
+**Qualified** (only fire when at least one primary keyword also hits the same name):
+`backup` / `bkp` · `dump` / `dmp` · `export` · `archive` · `snapshot` / `snap` · `leak` / `leaked` · `old` / `orig` / `save`
+
+So `db_dump.sql` alone is silent, but `passwords_backup.txt` flags both `passwords` and `backup`.
 
 ## Output
 
@@ -203,7 +211,7 @@ Output formats: **text** (colored terminal, default) · **json** · **csv** · *
 | Credential files | KeePass / Password Safe / 1Password / Apple Keychain / Bitwarden / mSecure / Dashlane / RoboForm vaults |
 | Filename patterns | Files named `password*`, `secret*`, `id_rsa*`, `htpasswd`, `*vault*`, `*keystore*`, … |
 
-103 detection rules total — run `hardcorde --list-rules` to see all of them.
+125 detection rules total — run `hardcorde --list-rules` to see all of them.
 
 ## Installation
 
@@ -223,17 +231,42 @@ credfinder /path/to/scan        # alias used in the help text
 
 ## Build a standalone binary
 
-```bash
-# Linux / macOS
-pip install pyinstaller
-./build.sh
+The build script (`build/build.py`) supports a native build plus two
+Docker-based cross-compile targets so you can produce x64 binaries for
+Linux and Windows from any host with Docker installed.
 
-# Windows
+```bash
+# ── Native (uses local PyInstaller) ───────────────────────────────
 pip install pyinstaller
-build.bat
+./build.sh                       # → dist/hardcorde-<host>-<arch>
+
+# ── Cross-compile (Docker required) ───────────────────────────────
+./build.sh --linux-x64           # → dist/hardcorde-linux-x64
+./build.sh --windows-x64         # → dist/hardcorde-windows-x64.exe
+./build.sh --all                 # native + linux-x64 + windows-x64
+
+# Windows host
+build.bat                        # native Windows build
+build.bat --linux-x64            # Linux cross-build (Docker required)
 ```
 
-Produces a single portable binary in `dist/` — drop it on a target and run.
+### Output
+
+| Target | Image used | Compatibility |
+|--------|------------|---------------|
+| `linux-x64` | `python:3.11-slim-bullseye` (glibc 2.31) | Debian 11+, Ubuntu 20.04+, RHEL 9+, Alpine via gcompat |
+| `windows-x64` | `tobix/pywine:3.10` (Wine) | Windows 10/11 x64, Server 2016+ |
+| `native` | local PyInstaller | host triple |
+
+Resulting binaries are single-file, ~5–8 MB each, fully self-contained
+(Python runtime + stdlib + hardcorde bundled together). Drop them on a
+target and run — no Python install required.
+
+```bash
+# Verify
+./dist/hardcorde-linux-x64 --version
+./dist/hardcorde-linux-x64 --list-rules | tail -1   # → "Total: 125 rules"
+```
 
 ## Exit codes
 

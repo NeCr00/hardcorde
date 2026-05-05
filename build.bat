@@ -3,8 +3,11 @@ REM ─────────────────────────�
 REM  HARDCORDE Release Builder (Windows)
 REM ──────────────────────────────────────────────
 REM  Usage:
-REM    build.bat               Native build for this machine
-REM    build.bat --native      Same as above
+REM    build.bat                  Native Windows build
+REM    build.bat --native         Same as above
+REM    build.bat --linux-x64      Cross-compile Linux (Docker required)
+REM    build.bat --all            Native + Linux x64
+REM    build.bat --clean          Wipe dist\ before building
 REM ──────────────────────────────────────────────
 
 cd /d "%~dp0"
@@ -15,4 +18,8 @@ if errorlevel 1 (
     pip install pyinstaller
 )
 
-python build\build.py --native %*
+if "%~1"=="" (
+    python build\build.py --native
+) else (
+    python build\build.py %*
+)

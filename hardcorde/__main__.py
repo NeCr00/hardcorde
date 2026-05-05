@@ -98,6 +98,11 @@ def _add_bool_flag(parser, name: str, default: bool, help_on: str, help_off: str
     """
     Add a paired --foo / --no-foo flag with a single dest.
     The default is `default`; the user can flip it either way.
+
+    Note: both add_argument calls explicitly set `default=default`. Without
+    that, the second call (`store_false`) would silently set the implicit
+    default to True, clobbering a default=False from the first call when
+    only one of the flags is used in an argparse group.
     """
     dest = name.replace("-", "_")
     grp = parser.add_mutually_exclusive_group()
@@ -106,7 +111,7 @@ def _add_bool_flag(parser, name: str, default: bool, help_on: str, help_off: str
         help=help_on + (" (default)" if default else ""),
     )
     grp.add_argument(
-        f"--no-{name}", dest=dest, action="store_false",
+        f"--no-{name}", dest=dest, action="store_false", default=default,
         help=help_off or f"disable: {help_on.lower()}",
     )
 
@@ -544,6 +549,17 @@ def main(argv: list[str] = None) -> int:
             sys.stderr.write(f"                       {len(kept)} filename match(es)\n")
         for hit in kept:
             all_findings.append(hit_to_finding(hit))
+
+    # Apply --severity filter uniformly across ALL findings.
+    # The engine already drops sub-threshold rules in --scan-target, but
+    # cred-store and filename-pattern findings bypass the engine — they need
+    # filtering here so a `--severity high` run doesn't surface medium-severity
+    # filename matches.
+    sev_max_rank = SEVERITY_RANK.get(args.severity, 4)
+    all_findings = [
+        f for f in all_findings
+        if SEVERITY_RANK.get(f.severity, 4) <= sev_max_rank
+    ]
 
     # Final ordering: severity then confidence
     all_findings.sort(

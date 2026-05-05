@@ -878,8 +878,12 @@ def _build_rules() -> list[Rule]:
         category=Category.TOKEN,
         severity=Severity.HIGH,
         description="JSON Web Token (may contain sensitive claims)",
+        # JWT = base64url(header) + '.' + base64url(payload) + '.' + base64url(sig)
+        # base64url is [A-Za-z0-9_-] (NO `.`, `+`, `/`, `=`). The previous
+        # signature class allowed `.+/=` which over-greedily swallowed text
+        # spanning multiple tokens.
         pattern=re.compile(
-            r'(?P<secret>eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_.+/=-]{10,})',
+            r'(?P<secret>eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})',
         ),
         min_entropy=3.0,
         min_length=50,
@@ -1283,6 +1287,8 @@ def _build_rules() -> list[Rule]:
     ))
 
     # `mysql -ppassword` / `mysql --password=value` / `mysqldump -p"..."`
+    # Uses lazy `[^\n]*?` to skip over flag-args between the binary name and
+    # the password flag (e.g. `mysql -u root -pPASS`).
     rules.append(Rule(
         id="MYSQL_CLI_PASSWORD",
         name="MySQL CLI with inline password",
@@ -1291,8 +1297,8 @@ def _build_rules() -> list[Rule]:
         description="mysql / mysqldump / mysqladmin invocation with -p<password>",
         pattern=re.compile(
             r'(?i)\b(?:mysql|mysqldump|mysqladmin|mysqlimport|mysqlshow|mariadb)\b'
-            r'(?:\s+[^\s\-][^\s]*)*'  # optional positional/non-flag args
-            r'\s+(?:-p\s*|--password\s*=\s*)'
+            r'[^\n]*?'                                         # lazy skip over other args
+            r'(?:\s-p\s*|\s--password\s*=\s*)'
             r'(?:["\'](?P<secret>[^"\'\s]{2,})["\']'
             r'|(?P<secret_unquoted>[^\s"\']{2,}))',
         ),
@@ -1802,6 +1808,9 @@ def _build_rules() -> list[Rule]:
 
     # ── 12.5 Other config-file formats ────────────────────────────────
     # .pgpass: hostname:port:database:username:password
+    # Each field follows libpq grammar — no whitespace, no slashes, no `@`,
+    # and the port is numeric or `*`. This rules out URL-shaped lines like
+    # `postgres://admin:secret@host:5432/db`, log timestamps, etc.
     rules.append(Rule(
         id="PGPASS_LINE",
         name=".pgpass entry",
@@ -1809,13 +1818,24 @@ def _build_rules() -> list[Rule]:
         severity=Severity.CRITICAL,
         description="PostgreSQL .pgpass-format line: host:port:db:user:password",
         pattern=re.compile(
-            r'(?m)^[^#:\n]+:[^:\n]+:[^:\n]+:[^:\n]+:(?P<secret>[^:\n]{2,})$',
+            r'(?m)^'
+            r'(?P<host>[^\s#:/@\n]+):'                # hostname (or *)
+            r'(?P<port>\*|\d{1,5}):'                   # numeric port or *
+            r'(?P<db>[^\s:/@\n]+):'                    # database (or *)
+            r'(?P<user>[^\s:/@\n]+):'                  # username
+            r'(?P<secret>[^\s:\n]{2,})'                # password (no whitespace/colon)
+            r'\s*$',
         ),
         min_entropy=1.0,
         min_length=2,
         check_entropy=False,
         false_positive_indicators=[],
+        context_keywords=["pgpass", "postgres", "postgresql", "psql"],
         tags=["password", "postgresql", "linux"],
+        # Pre-filter on a literal substring that nearly all real .pgpass lines have:
+        # at least one ':' AND something postgres-related nearby. We can't easily
+        # require "postgres" in the line itself (real .pgpass files don't), so we
+        # require the line have at least 4 colons in addition to ':' fast-key.
         fast_keywords=[":"],
     ))
 
@@ -1962,6 +1982,476 @@ def _build_rules() -> list[Rule]:
         check_entropy=False,
         tags=["password", "ftp", "linux", "command"],
         fast_keywords=["lftp", "ftp "],
+    ))
+
+    # =======================================================================
+    # 13. EXTRA REAL-WORLD PATTERNS (CTF / HTB / pentest gold mines)
+    # =======================================================================
+
+    # JS/TS object literal with UNQUOTED key (very common in JS/TS source).
+    # The PASSWORD_JSON_KEY rule requires `"password"` (quoted). Real JS uses
+    # unquoted keys: `{ password: 'foo' }`, `{ apiKey: "bar" }`. Quoted-key
+    # values don't double-trigger because the leading char class excludes `"`.
+    rules.append(Rule(
+        id="PASSWORD_JS_UNQUOTED_KEY",
+        name="Password in JS/TS object literal (unquoted key)",
+        category=Category.PASSWORD,
+        severity=Severity.HIGH,
+        description="JavaScript/TypeScript object literal with unquoted password-style key",
+        pattern=re.compile(
+            r'(?i)(?:^|[\s,{(\[])'                              # start, ws, or block opener
+            r'(?P<keyname>[a-z_$][\w$]*'
+            r'(?:[Pp]ass(?:word|wd|phrase)?|[Pp]wd|[Ss]ecret|[Cc]redential|'
+            r'[Aa]pi[_-]?[Kk]ey|[Aa]uth[_-]?[Tt]oken|[Aa]ccess[_-]?[Kk]ey|'
+            r'[Cc]lient[_-]?[Ss]ecret)[\w$]*)'
+            r'\s*:\s*'
+            r'["\'`](?P<secret>[^"\'`\\\n]{4,})["\'`]',         # backticks too (template literals)
+        ),
+        min_entropy=2.0,
+        min_length=4,
+        context_keywords=["password", "secret", "credential", "auth", "key", "config"],
+        tags=["password", "javascript", "typescript", "object_literal"],
+        fast_keywords=["password", "passwd", "pwd", "secret", "credential",
+                       "apikey", "api_key", "auth_token", "authtoken",
+                       "access_key", "client_secret", "clientsecret"],
+    ))
+
+    # HTTP `Authorization: Basic <base64>` headers.
+    # Decoded base64 contains `user:pass`, but we only flag the encoded form
+    # so the user can decode and validate manually.
+    rules.append(Rule(
+        id="HTTP_BASIC_AUTH_HEADER",
+        name="HTTP Basic Auth header (base64)",
+        category=Category.PASSWORD,
+        severity=Severity.HIGH,
+        description="Authorization: Basic <base64> header (decode for credentials)",
+        pattern=re.compile(
+            r'(?i)Authorization\s*:\s*Basic\s+(?P<secret>[A-Za-z0-9+/=]{8,})',
+        ),
+        min_entropy=2.5,
+        min_length=8,
+        context_keywords=["authorization", "basic", "header", "request"],
+        tags=["password", "http", "basic_auth", "header"],
+        fast_keywords=["authorization", "basic"],
+    ))
+
+    # FTP/SFTP/SCP URL with embedded credentials. BASIC_AUTH_URL only matched
+    # http(s); these schemes are extremely common in pentests, especially on
+    # legacy Windows boxes and HTB pwn boxes.
+    rules.append(Rule(
+        id="NON_HTTP_AUTH_URL",
+        name="FTP / SFTP / SCP URL with credentials",
+        category=Category.PASSWORD,
+        severity=Severity.HIGH,
+        description="Non-HTTP URL with user:password embedded in the authority",
+        pattern=re.compile(
+            r'(?P<secret>(?:ftp|ftps|sftp|scp|smb|cifs|svn(?:\+ssh)?|git(?:\+ssh|\+https)?)'
+            r'://[^:@\s]+:[^:@\s]+@[^\s"\'<>]+)',
+            re.IGNORECASE,
+        ),
+        min_entropy=1.5,
+        context_keywords=["url", "remote", "endpoint"],
+        tags=["url", "basic_auth", "ftp", "smb"],
+        fast_keywords=["://"],
+    ))
+
+    # Ansible Vault encrypted blob — distinctive header line.
+    rules.append(Rule(
+        id="ANSIBLE_VAULT_BLOB",
+        name="Ansible Vault encrypted blob",
+        category=Category.GENERIC_SECRET,
+        severity=Severity.CRITICAL,
+        description="$ANSIBLE_VAULT;1.x;AES256 — encrypted secret blob (review for vault password reuse)",
+        pattern=re.compile(
+            r'(?P<secret>\$ANSIBLE_VAULT;\d+\.\d+;AES256(?:;[\w-]+)?)',
+        ),
+        check_entropy=False,
+        line_match=True,
+        false_positive_indicators=[],
+        tags=["ansible", "vault", "encrypted"],
+        fast_keywords=["$ANSIBLE_VAULT"],
+    ))
+
+    # SSH passphrase prompt in scripts: `ssh-keygen ... -N "passphrase"`,
+    # `ssh-keygen -p -P old -N new ...`
+    rules.append(Rule(
+        id="SSH_KEYGEN_PASSPHRASE",
+        name="ssh-keygen with inline passphrase",
+        category=Category.PASSWORD,
+        severity=Severity.HIGH,
+        description="ssh-keygen invocation with -N (new passphrase) or -P (old passphrase)",
+        pattern=re.compile(
+            r'(?i)\bssh-keygen\b[^\n]*?'
+            r'\s-(?P<flag>[NP])\s+'
+            r'(?:["\'](?P<secret>[^"\'\n]*)["\']'
+            r'|(?P<secret_unquoted>[^\s"\']+))',
+        ),
+        min_entropy=1.0,
+        min_length=0,                                 # empty -N "" still notable
+        check_entropy=False,
+        tags=["password", "ssh", "linux", "command"],
+        fast_keywords=["ssh-keygen"],
+    ))
+
+    # Windows runas with password (`runas /user:DOM\u /noprofile passwordvalue`)
+    # Plus the rarer `psexec.py user:pass@host` Impacket form.
+    rules.append(Rule(
+        id="IMPACKET_USER_PASS",
+        name="Impacket-style user:pass@host",
+        category=Category.PASSWORD,
+        severity=Severity.CRITICAL,
+        description="Impacket / Python-style user:password@host argument",
+        pattern=re.compile(
+            r'(?i)\b(?:psexec|wmiexec|smbexec|atexec|dcomexec|smbclient|'
+            r'crackmapexec|cme|nxc|netexec|impacket-\w+)(?:\.py)?\b[^\n]*?\s'
+            r'(?P<secret>[A-Za-z0-9._\\-]+/[A-Za-z0-9._\\-]+:'
+            r'[^\s@/\\:]{2,}@[^\s/]+)',
+        ),
+        min_entropy=1.5,
+        min_length=6,
+        check_entropy=False,
+        false_positive_indicators=[],
+        tags=["password", "windows", "command", "lateral_movement", "impacket"],
+        fast_keywords=["psexec", "wmiexec", "smbexec", "atexec",
+                       "smbclient", "crackmapexec", "netexec",
+                       "impacket"],
+    ))
+
+    # Maven master password (settings-security.xml: `<master>{...}</master>`)
+    rules.append(Rule(
+        id="MAVEN_MASTER_PASSWORD",
+        name="Maven master password",
+        category=Category.PASSWORD,
+        severity=Severity.CRITICAL,
+        description="Maven settings-security.xml master password block",
+        pattern=re.compile(
+            r'(?is)<master>\s*\{(?P<secret>[A-Za-z0-9+/=]{12,})\}\s*</master>',
+        ),
+        min_entropy=2.5,
+        min_length=12,
+        false_positive_indicators=[],
+        tags=["password", "maven", "java"],
+        fast_keywords=["<master>"],
+        multiline=True,
+    ))
+
+    # Hadoop core-site.xml / hbase-site.xml `<value>password</value>`
+    # nested under property name=*password*
+    rules.append(Rule(
+        id="HADOOP_PROPERTY_PASSWORD",
+        name="Hadoop XML property password",
+        category=Category.PASSWORD,
+        severity=Severity.HIGH,
+        description="Hadoop-style XML <property> with password-like name and inline value",
+        pattern=re.compile(
+            r'(?is)<property>\s*'
+            r'<name>\s*(?P<keyname>[\w.-]*'
+            r'(?:password|passwd|pwd|secret|credential)[\w.-]*)\s*</name>\s*'
+            r'<value>\s*(?P<secret>[^<]{3,})\s*</value>',
+        ),
+        min_entropy=1.5,
+        min_length=3,
+        false_positive_indicators=[],
+        tags=["password", "hadoop", "xml"],
+        fast_keywords=["<property>", "<name>"],
+        multiline=True,
+    ))
+
+    # PHP variable assignment: `$var = "..."` where var contains password keyword.
+    # Catches `$db_password = "..."`, `$DBPassword = "..."`, etc. Distinct from
+    # PASSWORD_KWARG because PHP heredocs and complex expressions may mismatch.
+    rules.append(Rule(
+        id="PHP_VAR_PASSWORD",
+        name="PHP password variable assignment",
+        category=Category.PASSWORD,
+        severity=Severity.HIGH,
+        description="PHP `$variable = '...';` whose name contains a password keyword",
+        pattern=re.compile(
+            r'(?i)\$(?P<varname>[\w]*'
+            r'(?:pass(?:word|wd|phrase)?|pwd|secret|credential|api[_-]?key|'
+            r'auth[_-]?token|access[_-]?key|client[_-]?secret)[\w]*)'
+            r'\s*=\s*'
+            r'(?:["\'](?P<secret>[^"\'\\\n]{4,})["\'])'
+            r'\s*;?',
+        ),
+        min_entropy=2.0,
+        min_length=4,
+        tags=["password", "php"],
+        fast_keywords=["$", "password", "passwd", "pwd", "secret",
+                       "credential", "client_secret"],
+    ))
+
+    # C / C++ / C# / Java / Go / Rust string literal with password keyword.
+    # `string password = "secret"` — covers most typed languages.
+    rules.append(Rule(
+        id="TYPED_LANG_PASSWORD",
+        name="Typed-language password variable",
+        category=Category.PASSWORD,
+        severity=Severity.HIGH,
+        description="Typed-language declaration assigning a password literal "
+                    "(C / C++ / C# / Java / Go / Rust / Kotlin / Swift)",
+        pattern=re.compile(
+            r'(?i)\b(?:'
+            r'(?:public|private|protected|internal|static|final|const|let|var|val|'
+            r'readonly|String|string|char|wchar_t|TCHAR|CHAR\*?)\s+)+'
+            r'(?P<varname>[\w]*'
+            r'(?:pass(?:word|wd|phrase)?|pwd|secret|credential|api[_-]?key|'
+            r'auth[_-]?token|access[_-]?key|client[_-]?secret)[\w]*)'
+            r'\s*(?:=|:)\s*'
+            r'(?:[Ll]"|@"|"|\'|`)(?P<secret>[^"\'\n`]{4,})(?:"|\'|`)',
+        ),
+        min_entropy=2.0,
+        min_length=4,
+        tags=["password", "typed_language"],
+        fast_keywords=["password", "passwd", "pwd", "secret", "credential",
+                       "client_secret"],
+    ))
+
+    # Redis AUTH / requirepass directive in redis.conf
+    rules.append(Rule(
+        id="REDIS_REQUIREPASS",
+        name="Redis requirepass / AUTH",
+        category=Category.PASSWORD,
+        severity=Severity.CRITICAL,
+        description="Redis configuration `requirepass` or in-script AUTH command",
+        pattern=re.compile(
+            r'(?im)^\s*(?:requirepass|masterauth)\s+'
+            r'["\']?(?P<secret>[^\s"\'#]{3,})["\']?',
+        ),
+        min_entropy=1.5,
+        min_length=3,
+        check_entropy=False,
+        false_positive_indicators=[],
+        tags=["password", "redis"],
+        fast_keywords=["requirepass", "masterauth"],
+    ))
+
+    # MongoDB role / SCRAM credential in shell scripts:
+    # `db.createUser({ user: "...", pwd: "secret", roles: [...] })`
+    rules.append(Rule(
+        id="MONGO_CREATEUSER_PWD",
+        name="MongoDB createUser with pwd",
+        category=Category.PASSWORD,
+        severity=Severity.CRITICAL,
+        description="MongoDB createUser / updateUser invocation with inline pwd",
+        pattern=re.compile(
+            r'(?is)\bdb(?:\.\w+)?\.(?:createUser|updateUser)\s*\([^)]*?'
+            r'\bpwd\s*:\s*["\'](?P<secret>[^"\']{3,})["\']',
+        ),
+        min_entropy=1.5,
+        min_length=3,
+        check_entropy=False,
+        false_positive_indicators=[],
+        tags=["password", "mongodb"],
+        fast_keywords=["createuser", "updateuser"],
+    ))
+
+    # Splunk `bind_password = ...` (LDAP auth in authorize.conf)
+    rules.append(Rule(
+        id="LDAP_BIND_PASSWORD",
+        name="LDAP bind password",
+        category=Category.PASSWORD,
+        severity=Severity.HIGH,
+        description="LDAP / AD bind password in app config (Splunk, Jenkins, etc.)",
+        pattern=re.compile(
+            r'(?im)^\s*(?:bind[_-]?(?:password|pw)|ldap[_.-]?(?:password|pw))'
+            r'\s*=\s*["\']?(?P<secret>[^"\'\s#]{3,})["\']?',
+        ),
+        min_entropy=1.5,
+        min_length=3,
+        tags=["password", "ldap", "ad"],
+        fast_keywords=["bind_password", "bind-password", "bindpassword",
+                       "ldap_password", "ldap-password", "ldap.password",
+                       "bind_pw"],
+    ))
+
+    # SMB / CIFS mount in /etc/fstab or scripts:
+    #   `mount -t cifs //srv/share -o username=u,password=p,dom=...`
+    #   `//srv/share /mnt cifs username=u,password=p ...`
+    rules.append(Rule(
+        id="CIFS_MOUNT_PASSWORD",
+        name="CIFS / SMB mount password",
+        category=Category.PASSWORD,
+        severity=Severity.CRITICAL,
+        description="CIFS / SMB mount line with inline password=",
+        pattern=re.compile(
+            r'(?i)(?:^|[\s,])password\s*=\s*'
+            r'(?P<secret>[^\s,#"\']{3,})'
+            r'(?=[\s,#].*?(?:cifs|smb|//\S+/\S+|guest|domain\s*=|workgroup))'
+            r'|(?:cifs|smb)[^\n]*?[\s,]password\s*=\s*'
+            r'(?P<secret2>[^\s,#"\']{3,})',
+        ),
+        min_entropy=1.5,
+        min_length=3,
+        check_entropy=False,
+        tags=["password", "cifs", "smb", "linux"],
+        fast_keywords=["cifs", "smb", "password=", "//"],
+    ))
+
+    # OpenLDAP / LDIF userPassword line: `userPassword: <hash>` or
+    # `userPassword:: <base64>` (binary attribute).
+    rules.append(Rule(
+        id="LDIF_USERPASSWORD",
+        name="LDIF userPassword attribute",
+        category=Category.HASH,
+        severity=Severity.CRITICAL,
+        description="LDIF userPassword: hash or base64-encoded password",
+        pattern=re.compile(
+            r'(?im)^\s*userPassword\s*::\s*(?P<secret>[A-Za-z0-9+/=]{8,})\s*$'
+            r'|^\s*userPassword\s*:\s*(?P<secret2>\S{4,})\s*$',
+        ),
+        min_entropy=2.0,
+        min_length=4,
+        check_entropy=False,
+        false_positive_indicators=[],
+        tags=["hash", "ldap", "ldif"],
+        fast_keywords=["userpassword"],
+    ))
+
+    # Stored Outlook IMAP/SMTP / Thunderbird inbox config (rare but seen):
+    #   `imap.password = ...`
+    rules.append(Rule(
+        id="MAIL_CLIENT_PASSWORD",
+        name="Mail client (IMAP/POP/SMTP) password",
+        category=Category.PASSWORD,
+        severity=Severity.HIGH,
+        description="Mail client config with imap/pop/smtp password",
+        pattern=re.compile(
+            r'(?i)\b(?:imap|pop3?|smtp|mail)[._-]?(?:password|passwd|pw|pwd|secret)'
+            r'\s*[=:]\s*["\']?(?P<secret>[^\s"\'#]{3,})["\']?',
+        ),
+        min_entropy=1.5,
+        min_length=3,
+        tags=["password", "mail"],
+        fast_keywords=["imap", "pop3", "smtp", "mail.password", "mail_password"],
+    ))
+
+    # Inline PSK (Pre-Shared Key) for VPN / WPA / IPSec
+    rules.append(Rule(
+        id="PSK_PRESHARED_KEY",
+        name="Pre-Shared Key (VPN / WPA / IPSec)",
+        category=Category.PASSWORD,
+        severity=Severity.HIGH,
+        description="Pre-shared key in network config (IPSec, WPA, OpenVPN tls-auth)",
+        pattern=re.compile(
+            r'(?i)\b(?:psk|pre[_-]?shared[_-]?key|wpa[_-]?(?:passphrase|psk)|'
+            r'shared[_-]?secret|secret)\s*[=:]\s*'
+            r'["\']?(?P<secret>[^\s"\'#]{8,})["\']?',
+        ),
+        min_entropy=2.5,
+        min_length=8,
+        context_keywords=["vpn", "ipsec", "wpa", "wireless", "openvpn",
+                          "strongswan", "racoon"],
+        tags=["password", "vpn", "wireless", "psk"],
+        fast_keywords=["psk", "pre_shared", "preshared", "pre-shared",
+                       "wpa_passphrase", "wpa_psk", "shared_secret"],
+    ))
+
+    # Cisco / Juniper enable-password / enable-secret in router/switch configs
+    rules.append(Rule(
+        id="CISCO_ENABLE_SECRET",
+        name="Cisco enable secret / password",
+        category=Category.PASSWORD,
+        severity=Severity.CRITICAL,
+        description="Cisco / Juniper enable secret, enable password, or username password",
+        pattern=re.compile(
+            r'(?im)^\s*(?:enable\s+(?:secret|password)|'
+            r'username\s+\S+\s+(?:secret|password|privilege\s+\d+\s+(?:secret|password)))'
+            r'(?:\s+\d)?\s+(?P<secret>\S{3,})',
+        ),
+        min_entropy=1.0,
+        min_length=3,
+        check_entropy=False,
+        false_positive_indicators=[],
+        tags=["password", "cisco", "juniper", "network"],
+        fast_keywords=["enable secret", "enable password",
+                       "username "],
+    ))
+
+    # Ruby/Rails `ENV['PASSWORD']` fallback patterns —  `|| 'fallback'`
+    # The fallback is often a real password used in dev that leaks to prod.
+    rules.append(Rule(
+        id="ENV_FALLBACK_PASSWORD",
+        name="Environment-variable fallback secret",
+        category=Category.PASSWORD,
+        severity=Severity.HIGH,
+        description="`ENV['X'] || 'fallback'` style: fallback often a real dev password",
+        pattern=re.compile(
+            r'(?i)(?:ENV|process\.env)'
+            r'(?:\[\s*["\'](?P<varname>[\w]*'
+            r'(?:pass(?:word|wd|phrase)?|pwd|secret|credential|api[_-]?key|'
+            r'token)[\w]*)["\']\s*\]|'
+            r'\.(?P<varname2>[\w]*'
+            r'(?:pass(?:word|wd|phrase)?|pwd|secret|credential|api[_-]?key|'
+            r'token)[\w]*))'
+            r'\s*\|\|\s*'
+            r'["\'](?P<secret>[^"\']{4,})["\']',
+        ),
+        min_entropy=2.0,
+        min_length=4,
+        tags=["password", "env_fallback", "ruby", "javascript"],
+        fast_keywords=["env[", "process.env", "||"],
+    ))
+
+    # Windows `LAPS` ms-Mcs-AdmPwd in PowerShell extracts:
+    #   `Get-LAPSADPassword … : Password = "..."`
+    rules.append(Rule(
+        id="LAPS_PASSWORD",
+        name="LAPS local-admin password (extracted)",
+        category=Category.PASSWORD,
+        severity=Severity.CRITICAL,
+        description="Microsoft LAPS local-admin password retrieved from AD",
+        pattern=re.compile(
+            r'(?i)\bms-?Mcs-?AdmPwd\b\s*[:=]\s*'
+            r'["\']?(?P<secret>[^\s"\']{6,})["\']?'
+            r'|\bGet-LAPS(?:AD)?Password\b[^\n]*?'
+            r'\bPassword\s*[:=]\s*["\']?(?P<secret2>[^\s"\']{6,})["\']?',
+        ),
+        min_entropy=2.0,
+        min_length=6,
+        false_positive_indicators=[],
+        tags=["password", "windows", "laps", "active_directory"],
+        fast_keywords=["ms-mcs-admpwd", "msmcsadmpwd", "get-laps"],
+    ))
+
+    # Smtp / sendmail-style auth: `AUTH PLAIN <base64>` (fired on captured traffic)
+    rules.append(Rule(
+        id="SMTP_AUTH_PLAIN",
+        name="SMTP AUTH PLAIN credential blob",
+        category=Category.PASSWORD,
+        severity=Severity.HIGH,
+        description="SMTP AUTH PLAIN <base64> — base64 of \\0user\\0pass",
+        pattern=re.compile(
+            r'(?i)\bAUTH\s+(?:PLAIN|LOGIN)\s+(?P<secret>[A-Za-z0-9+/=]{12,})',
+        ),
+        min_entropy=2.5,
+        min_length=12,
+        context_keywords=["smtp", "auth", "ehlo", "helo", "mail from"],
+        tags=["password", "smtp"],
+        fast_keywords=["auth plain", "auth login"],
+    ))
+
+    # Generic "the password is X" / "password = X" comment pattern (CTF clue)
+    rules.append(Rule(
+        id="COMMENT_PASSWORD_LEAK",
+        name="Password leaked in comment / docstring",
+        category=Category.PASSWORD,
+        severity=Severity.MEDIUM,
+        description="Password mentioned in a comment, docstring, or README: 'password is X' / 'pass: X'",
+        pattern=re.compile(
+            r'(?i)(?:#|//|/\*|;|<!--|\*)\s*'
+            r'(?:(?:the\s+)?(?:default\s+|admin\s+|root\s+)?'
+            r'(?:password|passwd|pwd|secret|credential|login)'
+            r'\s*(?:is|:|=)\s*)'
+            r'["\']?(?P<secret>[^\s"\'#<*]{3,})["\']?',
+        ),
+        min_entropy=1.5,
+        min_length=3,
+        tags=["password", "comment", "ctf"],
+        fast_keywords=["password is", "passwd is", "pwd is",
+                       "secret is", "credential is", "login is",
+                       "password:", "passwd:", "secret:",
+                       "password=", "secret="],
     ))
 
     return rules

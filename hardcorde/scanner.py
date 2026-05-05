@@ -49,82 +49,212 @@ BINARY_EXTENSIONS: frozenset[str] = frozenset({
     ".map",
 })
 
-# Extensions that are *high-value* for credential hunting
+# Extensions that are *high-value* for credential hunting.
+# This list is the default content-scan allowlist. It is biased towards
+# real-world CTF/HTB/pentest experience: a file that *probably* has secrets
+# in plaintext on the box you just landed on.
 HIGH_VALUE_EXTENSIONS: frozenset[str] = frozenset({
-    # Config
-    ".env", ".ini", ".cfg", ".conf", ".config", ".cnf",
-    ".toml", ".yaml", ".yml", ".json", ".xml", ".properties",
-    ".hcl", ".tf", ".tfvars", ".tfstate",
-    # Scripts
-    ".sh", ".bash", ".zsh", ".fish", ".bat", ".cmd", ".ps1", ".psm1",
-    ".py", ".rb", ".pl", ".php", ".js", ".ts", ".go", ".java",
-    ".cs", ".cpp", ".c", ".h", ".hpp", ".rs", ".swift", ".kt",
-    ".groovy", ".gradle", ".scala", ".lua", ".r", ".R",
-    # Web
-    ".html", ".htm", ".asp", ".aspx", ".jsp", ".ejs", ".twig",
-    ".erb", ".hbs", ".vue", ".svelte",
-    # Infra / CI
-    ".dockerfile", ".vagrantfile",
-    # Certs / keys
+    # ── Config ────────────────────────────────────────────────────────
+    ".env", ".envrc",                                  # dotenv + direnv
+    ".ini", ".cfg", ".conf", ".config", ".cnf",
+    ".toml", ".yaml", ".yml", ".json", ".json5", ".jsonc",
+    ".xml", ".plist",
+    ".properties", ".props",                           # Java props / msbuild
+    ".targets",                                        # msbuild
+    # IaC / configuration management
+    ".hcl", ".tf", ".tfvars", ".tfvars.json", ".tfstate", ".tfstate.backup",
+    ".tftpl", ".tfplan",
+    # Templating (often contain creds in Ansible / Helm / Salt)
+    ".j2", ".jinja", ".jinja2", ".tpl", ".tmpl",
+    ".liquid", ".mustache",
+    # Cloud / CI definitions
+    ".cscfg", ".publishsettings", ".pubxml",
+    # ── Scripts / Source ───────────────────────────────────────────────
+    ".sh", ".bash", ".zsh", ".fish", ".ksh", ".csh", ".tcsh",
+    ".bat", ".cmd", ".ps1", ".psm1", ".psd1",
+    ".vbs", ".vbe", ".wsf", ".hta", ".vbscript",
+    ".py", ".pyw", ".rb", ".pl", ".pm", ".php", ".php3", ".php4",
+    ".php5", ".phtml", ".phar",
+    ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx",
+    ".go", ".java", ".kts",
+    ".cs", ".vb", ".fs", ".fsx",
+    ".cpp", ".cc", ".cxx", ".c", ".h", ".hpp", ".hxx",
+    ".rs", ".swift", ".kt", ".m", ".mm",
+    ".groovy", ".gradle", ".scala", ".sbt",
+    ".lua", ".r", ".R",
+    ".dart", ".elixir", ".ex", ".exs", ".erl", ".clj",
+    ".tcl", ".awk",
+    # ── Web ────────────────────────────────────────────────────────────
+    ".html", ".htm", ".xhtml",
+    ".asp", ".aspx", ".ascx", ".cshtml", ".razor", ".master",
+    ".jsp", ".jspx", ".cfm", ".cfc",
+    ".ejs", ".twig", ".erb", ".hbs", ".handlebars",
+    ".vue", ".svelte", ".astro",
+    ".htaccess", ".htdigest",                          # Apache control files
+    # ── Infra / CI ─────────────────────────────────────────────────────
+    ".dockerfile", ".containerfile", ".vagrantfile",
+    ".sln", ".csproj", ".vcxproj", ".vbproj", ".fsproj",
+    ".user", ".vcxproj.user",
+    # ── Certs / keys ───────────────────────────────────────────────────
     ".pem", ".key", ".crt", ".cer", ".csr", ".p12", ".pfx",
-    ".jks", ".keystore", ".pub",
-    # Misc text
-    ".txt", ".log", ".csv", ".tsv", ".md", ".rst", ".tex",
-    ".sql", ".graphql", ".proto",
-    # Backup / temp
-    ".bak", ".old", ".orig", ".save", ".swp", ".tmp",
-    ".backup", ".copy",
-    # Data formats
-    ".plist", ".reg",
+    ".jks", ".keystore", ".pub", ".asc", ".gpg",
+    ".ppk",                                            # PuTTY private key
+    ".ovpn",                                           # OpenVPN client config (often has inline auth)
+    # ── Auth-shaped files ──────────────────────────────────────────────
+    ".pwd", ".pass", ".passwd", ".password",
+    ".cred", ".creds", ".credential", ".credentials",
+    ".secret", ".secrets",
+    ".kbx",                                            # GnuPG keybox
+    # ── Data / reports ─────────────────────────────────────────────────
+    ".txt", ".log", ".csv", ".tsv", ".md", ".rst", ".tex", ".org",
+    ".sql", ".sqlite-journal",                         # SQL dumps + WAL
+    ".graphql", ".gql", ".proto",
+    ".dump", ".dmp",                                   # generic dumps (DB / memory)
+    ".har",                                            # HTTP archive — captures auth headers
+    ".eml", ".mbox",                                   # email exports
+    # ── Backup / temp / leftover ───────────────────────────────────────
+    ".bak", ".bkp", ".old", ".orig", ".save", ".swp", ".swo",
+    ".tmp", ".temp", ".cache",
+    ".backup", ".bk", ".copy", ".prev",
+    # ── Data formats ───────────────────────────────────────────────────
+    ".reg",                                            # Windows registry export
+    ".rdp", ".ica", ".pubxml.user",                    # remote-desktop / Citrix / VS user
+    ".udl", ".dsn",                                    # ODBC / OLE-DB
+    ".ftpconfig", ".unattend", ".inf", ".gpp",         # Windows deploy
+    ".publishsettings",
+    ".tnsnames", ".ora",                               # Oracle
 })
 
 # Filenames (basename only, no path components) that are high-value
 HIGH_VALUE_FILENAMES: frozenset[str] = frozenset({
-    # dotenv variants
+    # ── dotenv variants ────────────────────────────────────────────────
     ".env", ".env.local", ".env.dev", ".env.development",
     ".env.staging", ".env.production", ".env.prod", ".env.test",
-    ".env.example", ".env.sample", ".env.backup",
-    # Git / credentials
-    ".gitconfig", ".git-credentials", ".netrc", ".npmrc",
-    ".pypirc", ".dockercfg",
-    # Dotfiles with secrets
-    ".pgpass", ".my.cnf", ".mysql_history",
-    ".bash_history", ".zsh_history", ".python_history",
-    # SSH key files
-    "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
-    "known_hosts", "authorized_keys",
-    # Web / app configs
-    "wp-config.php", "web.config", "appsettings.json",
-    "database.yml", "secrets.yml", "credentials.yml",
+    ".env.example", ".env.sample", ".env.backup", ".env.bak",
+    ".env.dist", ".env.shared", ".env.defaults", ".env.override",
+    ".env.docker", ".env.ci",
+    # ── Git / package manager / generic credentials ────────────────────
+    ".gitconfig", ".git-credentials", ".netrc", ".npmrc", ".yarnrc",
+    ".yarnrc.yml", ".pypirc", ".dockercfg", ".dockerignore",
+    ".composer-auth", ".composer.json", "auth.json",     # Composer auth
+    ".bundle/config", "bundle/config",                    # Ruby bundler
+    ".cargo/credentials", ".cargo/config",                # Rust
+    ".gem/credentials",                                   # RubyGems
+    ".terraformrc", "terraform.rc",                       # Terraform
+    "id_rsa.pub", "id_ecdsa.pub", "id_ed25519.pub",
+    # ── Dotfiles with potential secrets ────────────────────────────────
+    ".pgpass", ".my.cnf", ".mylogin.cnf",
+    ".mysql_history", ".psql_history", ".sqlite_history",
+    ".bash_history", ".zsh_history", ".sh_history",
+    ".ash_history", ".ksh_history", ".fish_history",
+    ".python_history", ".node_repl_history", ".rediscli_history",
+    ".lesshst", ".viminfo",                                # leak file paths/text
+    ".gnupg", ".pinentry",
+    ".rhosts", ".shosts",                                  # legacy r-services
+    ".hgrc", ".hg/hgrc",
+    # ── SSH key files ──────────────────────────────────────────────────
+    "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "id_xmss",
+    "id_rsa-cert", "id_ed25519-cert",
+    "known_hosts", "authorized_keys", "authorized_keys2",
+    "ssh_host_rsa_key", "ssh_host_ecdsa_key", "ssh_host_ed25519_key",
+    "ssh_host_dsa_key",                                   # legacy
+    # ── Web / app configs (CMS, frameworks) ────────────────────────────
+    "wp-config.php", "wp-config-sample.php", "wp-config.bak",
+    "web.config", "machine.config", "appsettings.json",
+    "appsettings.development.json", "appsettings.production.json",
+    "database.yml", "database.yaml", "database.json",
+    "secrets.yml", "secrets.yaml", "credentials.yml", "credentials.yaml",
     "docker-compose.yml", "docker-compose.yaml",
-    "Dockerfile", "Vagrantfile", "Jenkinsfile",
-    "Makefile", "Rakefile", "Gemfile",
-    # Auth / password files
-    "shadow", "passwd", "htpasswd", ".htpasswd",
-    # App settings
-    "settings.py", "local_settings.py", "config.py",
-    "application.properties", "application.yml",
+    "docker-compose.override.yml", "docker-compose.prod.yml",
+    "compose.yml", "compose.yaml",
+    "Dockerfile", "Containerfile",
+    "Vagrantfile", "Jenkinsfile", "Procfile",
+    "Makefile", "Rakefile", "Gemfile", "Gemfile.lock",
+    "package.json", "pom.xml", "build.gradle", "build.gradle.kts",
+    # CMS configs
+    "configuration.php",                                   # Joomla
+    "settings.php",                                        # Drupal
+    "config.inc.php",                                      # phpMyAdmin
+    "local.xml",                                           # Magento 1
+    "env.php",                                             # Magento 2
+    "LocalSettings.php",                                   # MediaWiki
+    "Configuration.yaml",                                  # NodeJS / generic
+    # ── Auth / password files (Linux + Apache) ─────────────────────────
+    "shadow", "shadow-", "passwd", "passwd-",
+    "gshadow", "gshadow-",
+    "master.passwd",                                       # FreeBSD
+    "htpasswd", ".htpasswd", "htdigest", ".htdigest",
+    "smbpasswd", "afppasswd",
+    "users.ldif",                                          # LDAP export
+    # ── Application settings & secrets ─────────────────────────────────
+    "settings.py", "local_settings.py", "production.py",
+    "config.py", "secrets.py", "private.py",
+    "application.properties", "application.yml", "application.yaml",
+    "application-prod.properties", "application-dev.properties",
+    "bootstrap.properties",                                # Spring
+    "context.xml", "server.xml",                           # Tomcat
+    "standalone.xml", "domain.xml",                        # WildFly / JBoss
+    "core-site.xml", "hdfs-site.xml", "yarn-site.xml",     # Hadoop
+    "hive-site.xml",
     "connections.xml", "recentservers.xml",
-    "filezilla.xml", "sitemanager.xml",
-    # Windows deployment
-    "unattend.xml", "sysprep.xml",
-    # PowerShell history
-    "ConsoleHost_history.txt",
-    # Framework configs
+    "filezilla.xml", "sitemanager.xml", "queue.xml",
+    "dbeaver-data-sources.json",                           # DBeaver
+    # ── Windows deployment ─────────────────────────────────────────────
+    "unattend.xml", "sysprep.xml", "autounattend.xml",
+    "Setupcomplete.cmd", "PostInstall.cmd",
+    "Groups.xml", "Services.xml", "Drives.xml",            # GPP
+    "ScheduledTasks.xml", "Printers.xml", "DataSources.xml",
+    "LAPS.xml",
+    # ── PowerShell / cmd history ───────────────────────────────────────
+    "ConsoleHost_history.txt", "ConsoleHost_history-1.txt",
+    # ── Framework configs (generic) ────────────────────────────────────
     "config.php", "configuration.php", "parameters.yml",
-    "secrets.json", "serviceAccountKey.json",
-    # Docker
-    "config.json",
-    # AWS
-    "credentials",
-    # SSH
-    "config",
+    "parameters.yaml", "params.yml",
+    "secrets.json", "secret.json",
+    "serviceAccountKey.json", "service-account.json",
+    "service-account-key.json", "gcp-key.json",
+    "client_secret.json", "credentials.json",
+    "config.json", "config.local.json",
+    "tokens.json", "auth.json",
+    # ── Cloud / SDK creds ──────────────────────────────────────────────
+    "credentials",                                         # AWS .aws/credentials
+    "config",                                              # SSH/AWS/GCP
+    "gcloud-credentials.json",
+    "azure-credentials.json", "azureProfile.json",
+    "kubeconfig", ".kubeconfig",
+    "rclone.conf",                                         # rclone — cloud creds
+    # ── Backup / artifact filenames seen on real boxes ─────────────────
+    "backup.sql", "dump.sql", "users.sql",
+    "users.csv", "passwords.csv", "userlist.txt",
+    "passwords.txt", "secrets.txt", "creds.txt",
+    "notes.txt", "todo.txt", "TODO",                       # CTF/HTB common
+    "README", "README.md", "README.txt",                   # creds in dev READMEs
+    # ── Ansible / Salt / Chef ──────────────────────────────────────────
+    "hosts", "hosts.ini", "inventory", "inventory.ini",
+    "ansible.cfg", "vault_pass.txt", ".vault_pass",
+    "group_vars", "host_vars",
+    "Pillar.sls", "top.sls",
+    "knife.rb", "client.rb",                               # Chef
+    # ── Other reflexively-secret files ─────────────────────────────────
+    "swagger.json", "swagger.yaml", "openapi.json", "openapi.yaml",
+    "phpinfo.php",                                         # leaks env vars
+    "info.php",
+    "phpunit.xml",                                         # often has DB creds
 })
 
 # Parent directory names that make a file high-value regardless of filename
-# (handles cases like .aws/credentials, .ssh/config, .docker/config.json)
+# (handles cases like .aws/credentials, .ssh/config, .docker/config.json,
+# gcloud/credentials.db, etc.).
 HIGH_VALUE_PARENT_DIRS: frozenset[str] = frozenset({
     ".aws", ".ssh", ".gnupg", ".docker", ".kube",
+    ".azure", ".gcloud", "gcloud",
+    ".cargo", ".gem", ".npm", ".yarn", ".composer",
+    ".terraform", ".ansible", ".vagrant",
+    ".pgadmin", ".dbeaver", ".dbeaver4",
+    "secrets", "secret", "credentials", "creds",
+    "PSReadLine",                                          # PowerShell history
+    "Sysprep", "Panther", "unattend",                      # Windows deploy
+    "PuTTY", "WinSCP",
 })
 
 # Directories to always skip (basename only — no path separators)
@@ -379,6 +509,11 @@ def read_file_lines(filepath: str, max_lines: int = 50000) -> list[str]:
     """
     Read a file and return its lines. Handles encoding gracefully.
     Uses UTF-8 with replacement characters for invalid bytes.
+
+    Long lines (>4 KB — almost always minified JS/CSS or binary-ish blobs)
+    are truncated to 4096 chars rather than dropped, so that the indices in
+    the returned list line up 1:1 with the file's real line numbers.
+    Dropping would silently shift every subsequent finding's line_number.
     """
     try:
         with open(filepath, "r", encoding="utf-8", errors="replace") as f:
@@ -386,10 +521,11 @@ def read_file_lines(filepath: str, max_lines: int = 50000) -> list[str]:
             for i, line in enumerate(f):
                 if i >= max_lines:
                     break
-                # Skip minified lines (>4KB single lines are almost certainly
-                # minified JS/CSS or binary-ish data, not hand-written config)
+                # Truncate (don't drop) to preserve 1:1 line-number alignment.
                 if len(line) > 4096:
-                    continue
+                    # Keep the trailing newline if present, drop the middle.
+                    nl = "\n" if line.endswith("\n") else ""
+                    line = line[:4096] + nl
                 lines.append(line)
             return lines
     except (OSError, PermissionError):

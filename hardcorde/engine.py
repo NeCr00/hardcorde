@@ -134,6 +134,7 @@ def _scan_multiline(
             except IndexError:
                 gd = {}
             secret_value = None
+            secret_group_used = None
             for name in sorted(
                 (n for n in gd if n == "secret" or n.startswith("secret")),
                 key=lambda n: (0 if n == "secret" else 1, n),
@@ -141,12 +142,21 @@ def _scan_multiline(
                 v = gd.get(name)
                 if v:
                     secret_value = v
+                    secret_group_used = name
                     break
             if not secret_value:
                 secret_value = m.group(0)
 
-            # Line number of the secret's start (or the whole match if no secret group)
-            secret_start = m.start("secret") if "secret" in gd and gd.get("secret") else m.start()
+            # Line number of the secret's start (or the whole match if no secret group).
+            # Use the actual matched group name — if `secret_unquoted` matched
+            # but `secret` didn't, we want the offset of `secret_unquoted`.
+            if secret_group_used:
+                try:
+                    secret_start = m.start(secret_group_used)
+                except (IndexError, ValueError):
+                    secret_start = m.start()
+            else:
+                secret_start = m.start()
             line_no = offset_to_line(secret_start)
 
             # Synthesize a single-line "line" string for the analyzer.

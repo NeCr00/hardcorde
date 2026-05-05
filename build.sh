@@ -2,11 +2,15 @@
 # ──────────────────────────────────────────────
 #  HARDCORDE Release Builder
 # ──────────────────────────────────────────────
-#  ./build.sh                 # Native build
-#  ./build.sh --all           # All 5 targets
-#  ./build.sh --linux         # All Linux (x64, x86, arm64)
-#  ./build.sh --windows       # Both Windows (x64, x86)
-#  ./build.sh --linux-x64     # Single target
+#  ./build.sh                 # Native build (host platform)
+#  ./build.sh --all           # native + linux-x64 + windows-x64
+#  ./build.sh --linux-x64     # Linux x64 binary (Docker required)
+#  ./build.sh --windows-x64   # Windows x64 binary (Docker + Wine)
+#  ./build.sh --clean         # Wipe ./dist before building
+#
+#  Cross-compile targets require Docker. Linux x64 builds on
+#  python:3.11-slim-bullseye for broad glibc compatibility.
+#  Windows x64 builds inside tobix/pywine:3.10.
 # ──────────────────────────────────────────────
 set -e
 cd "$(dirname "$0")"
