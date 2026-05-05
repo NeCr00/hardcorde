@@ -144,6 +144,17 @@ SKIP_DIRS: frozenset[str] = frozenset({
 })
 
 
+def _resolve_ext(fname: str) -> str:
+    """
+    Lowercase extension, with dotfile handling: a bare dotfile like
+    ".env" or ".bashrc" is treated as having extension ".env" / ".bashrc"
+    so users can target it with --ext .env.
+    """
+    if fname.startswith(".") and "." not in fname[1:]:
+        return fname.lower()
+    return Path(fname).suffix.lower()
+
+
 @dataclass
 class FileInfo:
     """Metadata about a discovered file."""
@@ -166,6 +177,13 @@ class ScanConfig:
     extra_skip_extensions: list[str] = field(default_factory=list)
     include_dirs: list[str] = field(default_factory=list)  # override skip for these
     only_high_value: bool = False
+    # Tuning flags from the CLI:
+    include_binary: bool = False
+    # If set, ONLY these extensions are scanned (overrides default allowlist).
+    # Lower-case, dot-prefixed (e.g. {".env", ".yml"}). Empty = no override.
+    ext_override: frozenset[str] = field(default_factory=frozenset)
+    # If set, these are added to the high-value extension list.
+    ext_extra: frozenset[str] = field(default_factory=frozenset)
 
 
 # Magic bytes for binary file detection
@@ -261,7 +279,19 @@ def discover_files(
     include_dirs = set(config.include_dirs)
     # Remove any included dirs from the skip set
     all_skip_dirs -= include_dirs
-    all_skip_ext = BINARY_EXTENSIONS | frozenset(config.extra_skip_extensions)
+    # Skip extensions: binaries by default + user extras. When --include-binary
+    # is on, drop the binary list entirely so even compiled artifacts are read.
+    if config.include_binary:
+        all_skip_ext = frozenset(config.extra_skip_extensions)
+    else:
+        all_skip_ext = BINARY_EXTENSIONS | frozenset(config.extra_skip_extensions)
+
+    # Decide which extensions are "scannable" (= candidate for content scan).
+    # ext_override fully replaces the default allowlist when present.
+    if config.ext_override:
+        allowlist = frozenset(config.ext_override)
+    else:
+        allowlist = HIGH_VALUE_EXTENSIONS | frozenset(config.ext_extra)
 
     for dirpath, dirnames, filenames in os.walk(
         root, topdown=True, followlinks=config.follow_symlinks
@@ -307,21 +337,33 @@ def discover_files(
             if size == 0 or size > config.max_file_size:
                 continue
 
-            # Extension check
-            ext = Path(fname).suffix.lower()
+            # Extension check (dotfile-aware: ".env" → ext ".env")
+            ext = _resolve_ext(fname)
             if ext in all_skip_ext:
                 continue
 
-            # Determine if high-value
-            is_high_value = _is_high_value_by_path(filepath, fname, ext)
+            # If the user passed --ext, ONLY those extensions are scanned —
+            # the high-value-filename / parent-dir promotions are also
+            # disabled, since the user's override is authoritative.
+            if config.ext_override and ext not in allowlist:
+                continue
+
+            # Determine if high-value (relative to the active allowlist)
+            is_high_value = (
+                ext in allowlist
+                or _is_high_value_by_path(filepath, fname, ext)
+            )
 
             if config.only_high_value and not is_high_value:
                 continue
 
-            # Binary content check (skip for known text extensions)
-            if ext not in HIGH_VALUE_EXTENSIONS and not is_high_value:
-                if not _is_likely_text(filepath):
-                    continue
+            # Binary content check. With --include-binary the heuristic
+            # is bypassed so even .so / .exe surface (caller still has to
+            # cope with the bytes).
+            if not config.include_binary:
+                if ext not in allowlist and not is_high_value:
+                    if not _is_likely_text(filepath):
+                        continue
 
             yield FileInfo(
                 path=filepath,

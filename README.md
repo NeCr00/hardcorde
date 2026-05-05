@@ -13,44 +13,141 @@
 <p align="center">
   <img src="https://img.shields.io/badge/python-3.9+-blue?style=flat-square" alt="Python">
   <img src="https://img.shields.io/badge/platform-windows%20%7C%20linux%20%7C%20macos-lightgrey?style=flat-square" alt="Platform">
-  <img src="https://img.shields.io/badge/rules-64-orange?style=flat-square" alt="Rules">
+  <img src="https://img.shields.io/badge/rules-103-orange?style=flat-square" alt="Rules">
   <img src="https://img.shields.io/badge/dependencies-0-green?style=flat-square" alt="Dependencies">
   <img src="https://img.shields.io/badge/license-MIT-yellow?style=flat-square" alt="License">
 </p>
 
 ---
- <p align="center">Fast, intelligent credential hunting and discovery for penetration testers. Finds hardcoded passwords, API keys, tokens, and secrets across filesystems. Zero dependencies.</p>
+<p align="center">A cross-platform CLI that hunts hardcoded credentials, password-manager databases, and credential-suggestive files. Auto-detects the host OS and runs every check by default.</p>
 
-## What it Does?
-Recursively scans a target path and extracts hardcoded credentials with high confidence. Not a grep wrapper — it uses entropy analysis, context awareness, known-key detection, and confidence scoring to separate real secrets from placeholders and documentation.
+## What it does
 
-Built for internal pentests, red team engagements, and CTF/lab environments.
+`credfinder` (the `hardcorde` package) runs four credential-discovery checks back-to-back:
 
-## Quick Start
+1. **OS-default credential locations** — well-known dotfiles, system configs, registry exports, etc., scoped to the detected OS.
+2. **Recursive content scan of `TARGET_PATH`** — when supplied, walks the path and applies all 64 detection rules to text-like files.
+3. **Credential-store file discovery** — surfaces password-manager and vault files by extension (`.kdbx`, `.psafe3`, `.agilekeychain`, `.keychain`, `.opvault`, …). Flagged by name only — never opened.
+4. **Suspicious filename patterns** — flags files whose name matches credential-suggestive keywords (`password`, `secret`, `id_rsa`, `htpasswd`, `wallet`, `keystore`, …).
+
+Every check is on by default. Each can be turned off with a `--no-*` flag.
+
+Built for authorized internal pentests, red-team engagements, and CTF/lab environments. Zero external dependencies.
+
+## Quick start
 
 ```bash
-# Scan a directory
-python3 -m hardcorde /var/www
+# Auto-detect OS and run all default checks
+python3 -m hardcorde
 
-# Scan with confidence filter (recommended)
-python3 -m hardcorde /home --min-confidence 50
+# Add a recursive content scan of /home
+python3 -m hardcorde /home
 
-# Compact output, no surrounding context
-python3 -m hardcorde /etc --no-context
+# Force the Windows check set (regardless of host OS)
+python3 -m hardcorde C:\Users --os windows
 
-# Export to JSON
-python3 -m hardcorde /opt -f json -o findings.json
+# Skip the OS-default-location sweep, just scan /etc
+python3 -m hardcorde /etc --no-linux-common --no-cred-stores
 
-# Export to HTML report
+# SARIF output for CI / GitHub Code Scanning ingestion
+python3 -m hardcorde /opt -f sarif -o findings.sarif
+
+# HTML report for client delivery
 python3 -m hardcorde /srv -f html -o report.html
 
-# Only high-value files (configs, scripts, keys)
-python3 -m hardcorde / --high-value-only --severity high
+# High-signal triage on a noisy host
+python3 -m hardcorde / --severity high --min-confidence 60
 ```
 
-## Output
+## CLI
 
-Each finding shows exactly what you need — the secret, where it is, and how confident the tool is:
+```
+credfinder [TARGET_PATH] [options]
+```
+
+### Scope
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `TARGET_PATH` | — | Optional root directory. Triggers Check 2. |
+| `--os {windows,linux,auto}` | `auto` | Override OS detection. |
+
+### Default checks (all on)
+
+Each check is enabled out of the box. Disable with the matching `--no-*` flag.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--win-common` / `--no-win-common` | on (Windows) | Well-known Windows credential locations: registry exports, unattend/sysprep, IIS, .aws, PSReadLine history, PuTTY, FileZilla, WinSCP, mRemoteNG, OpenVPN, DPAPI material, AppData configs, user desktop/documents/downloads. |
+| `--linux-common` / `--no-linux-common` | on (Linux) | Well-known Linux credential locations: shell history (bash/zsh/fish/ash/ksh), `.ssh/`, `/etc/shadow` and friends, `/etc/sudoers*`, environment/profile files, cloud creds (.aws, .azure, .config/gcloud, .kube, .docker), DB client history, `/var/www`, nginx/apache/httpd configs, `/etc`, `/opt`, `/srv`, systemd units, cron, `/var/log`, `/tmp`, `/var/tmp`, `/dev/shm`. |
+| `--scan-target` / `--no-scan-target` | on if `TARGET_PATH` given | Recursive content scan of `TARGET_PATH` with the rule engine. |
+| `--cred-stores` / `--no-cred-stores` | on | Discover password-manager / credential-vault files by extension. |
+| `--filename-patterns` / `--no-filename-patterns` | on | Flag files whose name matches credential-suggestive keywords. |
+
+### Output
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-f, --format {text,json,csv,sarif,html}` | `text` | Output format. `terminal` is accepted as an alias for `text`. |
+| `-o, --output FILE` | stdout | Write findings to file. |
+| `--no-color` | — | Disable ANSI colors. |
+| `--no-context` | — | Hide the surrounding code lines per finding. |
+| `-q, --quiet` | — | Suppress progress output. |
+| `-v, --verbose` | — | Show the confidence-score breakdown for each finding. |
+
+### Filtering
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--min-confidence N` | `25` | Minimum confidence score (0–100) to report. |
+| `--severity {critical,high,medium,low,info}` | `info` | Minimum severity to report. |
+| `--category CAT...` | — | Limit to specific categories. |
+| `--tags TAG...` | — | Limit to rules carrying any of these tags. |
+| `--rules ID...` / `--exclude-rules ID...` | — | Run / skip specific rule IDs. |
+
+### Tuning
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--max-size BYTES` | `10485760` (10 MB) | Skip files larger than this. |
+| `--include-binary` | off | Include binary files in the content scan. |
+| `--ext LIST` | — | **Override** the default content-scan extension allowlist (e.g. `--ext .env,.yml,.json`). |
+| `--add-ext LIST` | — | **Extend** the default extension allowlist. |
+| `--max-depth N` | `50` | Maximum recursion depth. |
+| `--follow-symlinks` | off | Follow symbolic links. |
+| `--high-value-only` | off | Only scan high-value file types (configs, scripts, secrets). |
+| `--skip-dirs DIR...` | — | Additional directory names to skip. |
+| `--skip-ext EXT...` | — | Additional extensions to skip. |
+| `--include-dirs DIR...` | — | Override the built-in skip list for these dirs. |
+| `-t, --threads N` | `4` | Concurrent workers. |
+
+## Default extension allowlist
+
+Used by the recursive content scan. Override with `--ext`, extend with `--add-ext`.
+
+* **Plain-text / config / data** — `.txt .log .csv .tsv .ini .conf .config .cfg .cnf .env .properties .props .xml .json .yaml .yml .toml .sql`
+* **Scripting / source** — `.ps1 .psm1 .psd1 .bat .cmd .vbs .vbe .js .jse .wsf .hta .py .pl .rb .php .asp .aspx .jsp .jspx .cfm .sh .ksh .bash` (plus `.zsh .fish .ts .go .java .cs .cpp .c .h .hpp .rs .swift .kt .groovy .scala .lua`)
+* **Windows-specific** — `.reg .rdp .ica .pubxml .publishsettings .udl .dsn .ftpconfig .unattend .inf .gpp .sln .csproj .user`
+* **Backup / leftover artifacts** — `.bak .backup .old .orig .save .tmp`
+* **Certs / keys** — `.pem .key .crt .cer .csr .p12 .pfx .jks .keystore .pub`
+
+## Credential-store file extensions
+
+Detected by Check 3 (`--cred-stores`). Files are flagged by extension only — the tool never tries to open or crack them.
+
+`.kdbx` `.kdb` (KeePass) · `.psafe3` (Password Safe) · `.agilekeychain` `.opvault` `.1pif` `.1pux` (1Password) · `.keychain` `.keychain-db` (Apple Keychain) · `.bkp` `.fsk` `.rfx` `.spdb` (misc password managers) · `.walletx` (Bitwarden export variants) · `.mlb` (mSecure) · `.dashlane` (Dashlane)
+
+Each hit reports full path, file size, last-modified time, and the matched store type.
+
+## Suspicious filename keywords
+
+Detected by Check 4 (`--filename-patterns`). Case-insensitive, matched as a token (`/`, `\`, `.`, `_`, `-`, or string boundary on each side).
+
+`password` / `passwords` · `passwd` · `pwd` · `secret` / `secrets` · `credential` / `credentials` / `creds` · `apikey` / `api_key` / `api-key` · `token` · `auth` · `private_key` · `id_rsa` · `id_dsa` · `id_ecdsa` · `id_ed25519` · `htpasswd` · `shadow` · `vault` · `keystore` · `keyring` · `wallet`
+
+`backup` and `dump` are *qualified* keywords — they only fire when at least one of the primary keywords also hits the same name. So `db_dump.sql` alone is silent, but `passwords_backup.txt` flags both.
+
+## Output
 
 ```
   [1]  CRITICAL  Database Connection URI
@@ -63,40 +160,50 @@ Each finding shows exactly what you need — the secret, where it is, and how co
       Secret:     sk_live_4eC39HqLyjWDarjtT1zdp7dc
       Confidence: [███████████████████░] 99%
 
-  [3]  HIGH  Hardcoded password assignment
-      /opt/app/config.py:12
-      Secret:     Pr0d_Db_P@ssw0rd!2024
-      Confidence: [██████████████████░░] 92%
+  [3]  CRITICAL  Credential store: KeePass 2 database
+      /home/alice/Documents/personal.kdbx
+      Secret:     <KeePass 2 database file: personal.kdbx>
+      Confidence: [████████████████████] 100%
+
+  [4]  MEDIUM  Suspicious filename: backup, passwords
+      /var/backups/old_passwords_backup.txt
+      Confidence: [████████████████░░░░] 80%
 ```
 
-Output formats: **terminal** (colored), **JSON**, **CSV**, **HTML** (standalone report).
+Output formats: **text** (colored terminal, default) · **json** · **csv** · **sarif** (SARIF 2.1.0 for CI ingestion) · **html** (standalone client report).
 
-## What it catches
+## How content detection is smart
+
+* **Entropy analysis** — distinguishes `Kj8$mNpQ2vXw!rT9` from `changeme`.
+* **Placeholder detection** — recognizes `${VAR}`, `{{template}}`, `<your-key-here>`, `TODO`, etc.
+* **Known public keys** — AWS example keys (`AKIAIOSFODNN7EXAMPLE`) score low.
+* **Context scoring** — boosts confidence when surrounding lines mention `password`, `database`, `auth`.
+* **Path awareness** — files in `/prod/`, `.env`, `.aws/credentials` score higher than `/test/`, `/docs/`.
+* **Comment penalty** — commented-out lines score lower.
+* **Keyword pre-filter** — skips regex on lines that can't possibly match, keeping the scan fast on large codebases.
+
+## Categories detected
 
 | Category | Examples |
 |----------|----------|
-| Passwords | Variable assignments, XML configs, INI files, PHP `define()`, `.netrc`, CLI `-p` flags, `net user /add` |
+| Passwords (generic) | Variable assignments, XML configs, INI files, PHP `define()`, `.netrc`, CLI `-p` flags, `net user /add` |
+| Passwords (structured) | JSON `"password": "..."`, YAML keys (incl. list items + `#` mid-value), TOML, Java `.properties` (Spring, Hibernate, Quarkus), function/constructor `password=` kwargs, Ruby/Perl `:password => "..."` |
+| Passwords (Linux shells) | `export PASSWORD=`, `mysql -p…`, `mysqldump`, `PGPASSWORD=`, `psql password=…`, `sshpass -p`, `curl -u user:pass`, `wget --password=`, `systemd Environment=`, expect `send "…\r"`, `useradd -p`, `chpasswd` |
+| Passwords (Windows) | PowerShell `$password=`, `New-Object PSCredential`, `ConvertTo-SecureString`, batch `set PASSWORD=`, `cmdkey /pass:`, `psexec -p`, `wmic /password:`, `net use`, `runas /user:`, `.reg` files, GPP `cpassword`, Task Scheduler XML `<Password>`, WinSCP saved sessions |
+| Passwords (SQL) | `CREATE USER … IDENTIFIED BY`, `ALTER USER`, `ALTER LOGIN WITH PASSWORD = N'…'`, `GRANT … IDENTIFIED BY`, `SET PASSWORD FOR …` (MySQL / PostgreSQL / MSSQL) |
+| Passwords (config files) | `.pgpass` lines, Apache `.htpasswd` (apr1, bcrypt, SHA1, DES), Maven `settings.xml`, .NET `<add key="…Password" value="…"/>`, Gradle `signing.password`/`maven.password`, OpenVPN inline `<auth-user-pass>`, Redis/Mongo CLI `-a`, ftp/lftp `-u user,pass` |
 | API Keys | AWS, Google, Stripe, SendGrid, Twilio, Mailgun, OpenAI, Anthropic |
-| Tokens | GitHub, GitLab, Slack, npm, PyPI, HuggingFace, Vault, Discord, Grafana |
-| Connection Strings | Database URIs, JDBC, ODBC, inline `Password=` parameters |
+| Tokens | GitHub, GitLab, Slack, npm, PyPI, HuggingFace, Vault, Discord, Grafana, Bearer, JWT |
+| Connection Strings | Database URIs (mysql/postgres/mongo/redis/mssql/oracle), JDBC, ODBC, inline `Password=` parameters |
 | Private Keys | RSA, DSA, EC, OpenSSH, PGP (PEM headers) |
 | Cloud Keys | AWS Access/Secret keys, Azure secrets, DigitalOcean |
-| Hashes | Unix shadow (`$6$`, `$2b$`, `$y$`), NTLM |
+| Hashes | Unix shadow (`$1$`, `$5$`, `$6$`, `$2a/b/y$`, `$argon2$`, `$scrypt$`, `$y$`), NTLM, htpasswd `{SHA}` |
 | App Secrets | Django `SECRET_KEY`, Flask, Laravel `APP_KEY`, WordPress salts |
 | Infra | Docker env secrets, Kubernetes secrets, Terraform defaults |
-| Windows | AutoLogon registry, PowerShell `ConvertTo-SecureString`, unattend.xml |
+| Credential files | KeePass / Password Safe / 1Password / Apple Keychain / Bitwarden / mSecure / Dashlane / RoboForm vaults |
+| Filename patterns | Files named `password*`, `secret*`, `id_rsa*`, `htpasswd`, `*vault*`, `*keystore*`, … |
 
-64 detection rules total. Run `hardcorde --list-rules` to see all of them.
-
-## How it's smart
-
-- **Entropy analysis** — Measures randomness to distinguish `Kj8$mNpQ2vXw!rT9` from `changeme`
-- **Placeholder detection** — Recognizes `${VAR}`, `{{template}}`, `<your-key-here>`, `TODO`, etc.
-- **Known public keys** — AWS example keys (`AKIAIOSFODNN7EXAMPLE`) score low, not high
-- **Context scoring** — Boosts confidence when surrounding lines mention `password`, `database`, `auth`
-- **Path awareness** — Files in `/prod/`, `.env`, `.aws/credentials` score higher than `/test/`, `/docs/`
-- **Comment penalty** — Commented-out lines score lower
-- **Keyword pre-filter** — Skips regex on lines that can't match, keeping it fast on large codebases
+103 detection rules total — run `hardcorde --list-rules` to see all of them.
 
 ## Installation
 
@@ -109,11 +216,12 @@ python3 -m hardcorde /path/to/scan
 # Or install as a CLI tool
 pip install -e .
 hardcorde /path/to/scan
+credfinder /path/to/scan        # alias used in the help text
 ```
 
 **Requirements:** Python 3.9+. No external dependencies.
 
-## Build Standalone Binary
+## Build a standalone binary
 
 ```bash
 # Linux / macOS
@@ -127,63 +235,11 @@ build.bat
 
 Produces a single portable binary in `dist/` — drop it on a target and run.
 
-## CLI Reference
+## Exit codes
 
-```
-hardcorde [OPTIONS] PATH [PATH ...]
-
-Output:
-  -f, --format          terminal | json | csv | html (default: terminal)
-  -o, --output FILE     Write to file instead of stdout
-  --no-context          Hide surrounding code lines
-  --no-color            Disable colors
-  --verbose             Show scoring breakdown per finding
-  -q, --quiet           Suppress progress bar
-
-Filtering:
-  --min-confidence N    Minimum confidence 0-100 (default: 25)
-  --severity LEVEL      Minimum severity: critical|high|medium|low|info
-  --category CAT ...    Filter by category (password, api_key, token, etc.)
-  --tags TAG ...        Filter by tag (aws, cloud, docker, etc.)
-  --rules ID ...        Only run specific rule IDs
-  --exclude-rules ID    Skip specific rule IDs
-
-Scanner:
-  --max-size MB         Max file size in MB (default: 10)
-  --max-depth N         Max directory depth (default: 50)
-  --high-value-only     Only scan config/secret/script files
-  --follow-symlinks     Follow symbolic links
-  --include-dirs DIR    Override skip list for specific dirs
-
-Common locations:
-  --win-common          Add common Windows credential locations
-  --linux-common        Add common Linux credential locations
-
-Performance:
-  -t, --threads N       Scanner threads (default: 4)
-```
-
-## Common Credential Location Scanning
-
-During internal pentests and privilege escalation, credentials are often left in predictable locations. The `--win-common` and `--linux-common` flags automatically scan these locations without requiring you to type every path manually.
-
-```bash
-hardcorde --linux-common                        # Scan all common Linux locations
-hardcorde --win-common                          # Scan all common Windows locations
-hardcorde /opt/webapp --linux-common            # User path + Linux common locations
-hardcorde C:\Projects --win-common -f json      # User path + Windows common + JSON
-hardcorde --linux-common --severity high -q     # Quick triage, high findings only
-```
-
-These flags are **additive** — they extend the scan scope alongside any user-supplied paths. Paths that don't exist or can't be accessed are silently skipped. No crashes on permission errors.
-
-### Windows locations (`--win-common`)
-
-PowerShell history, unattend/sysprep XML, IIS/web.config, .NET config, cloud credentials (AWS/Azure/GCP/Kube), SSH keys, PuTTY config, FileZilla/WinSCP/mRemoteNG saved sessions, OpenVPN configs, DPAPI credential locations, AppData config files, user desktops/documents/downloads.
-
-### Linux locations (`--linux-common`)
-
-Shell history (bash/zsh/fish/ash), SSH keys, /etc/shadow and backups, environment/profile files, cloud credentials (AWS/Azure/GCP/Kube/Docker), database client history (.mysql_history/.psql_history/.my.cnf), web roots (/var/www, nginx, apache configs), /etc configs, /opt and /srv apps, systemd units, cron jobs, /var/log, /tmp and /dev/shm.
+* `0` — no high+ findings (or only filtered-out findings remained).
+* `1` — at least one CRITICAL or HIGH finding above `--min-confidence`.
+* `2` — argument / configuration error (e.g. all checks disabled, missing path).
 
 ## Disclaimer
 

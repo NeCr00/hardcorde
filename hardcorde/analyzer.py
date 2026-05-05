@@ -422,16 +422,22 @@ def analyze_line(
     if not match:
         return None
 
-    # Extract the secret value from named groups
+    # Extract the secret value from named groups. Rules may declare any
+    # number of alternatives via groups like `secret`, `secret_unquoted`,
+    # `secret2`, `secret2_unquoted`, `secret3`, … — we try them in
+    # registration order and pick the first non-empty match.
     secret_value = None
-    for group_name in ("secret", "secret_unquoted", "secret2"):
-        try:
-            val = match.group(group_name)
-            if val:
-                secret_value = val
-                break
-        except IndexError:
-            continue
+    secret_group_names = [
+        name for name in match.groupdict().keys()
+        if name == "secret" or name.startswith("secret")
+    ]
+    # Stable ordering: "secret" first, then the others in pattern order.
+    secret_group_names.sort(key=lambda n: (0 if n == "secret" else 1, n))
+    for group_name in secret_group_names:
+        val = match.group(group_name)
+        if val:
+            secret_value = val
+            break
 
     if not secret_value:
         # Fallback: use the entire match
