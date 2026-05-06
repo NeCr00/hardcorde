@@ -48,9 +48,35 @@ class EngineConfig:
     categories: Optional[list[str]] = None     # Only these categories
     tags: Optional[list[str]] = None           # Only rules with these tags
     severity_min: str = "info"                 # Minimum severity to report
+    passwords_only: bool = False               # Restrict to password-class rules
 
 
 SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
+
+def is_password_rule(rule: Rule) -> bool:
+    """
+    A rule counts as a 'password rule' (for --passwords-only) when it
+    targets actual hardcoded password material. We include:
+
+      - Category.PASSWORD               — direct password assignments
+      - Category.HASH                   — password hashes (shadow, NTLM,
+                                          htpasswd, LDIF userPassword) —
+                                          these are passwords-at-rest
+      - rules tagged with "password"    — connection strings with embedded
+                                          passwords (DATABASE_URI tagged
+                                          via `password` are kept this way)
+
+    We deliberately EXCLUDE:
+      API keys, OAuth tokens, JWTs, bearer tokens, GitHub/GitLab/Slack
+      tokens, PEM private keys, env-secret blobs (`MY_SECRET=`), generic
+      high-entropy strings, certificate files, credential-store files.
+    """
+    if rule.category.value in {"password", "hash"}:
+        return True
+    if "password" in rule.tags:
+        return True
+    return False
 
 
 def _filter_rules(config: EngineConfig) -> list[Rule]:
@@ -72,6 +98,9 @@ def _filter_rules(config: EngineConfig) -> list[Rule]:
     if config.tags:
         tag_set = set(config.tags)
         rules = [r for r in rules if tag_set & set(r.tags)]
+
+    if config.passwords_only:
+        rules = [r for r in rules if is_password_rule(r)]
 
     min_rank = SEVERITY_RANK.get(config.severity_min, 4)
     rules = [r for r in rules if SEVERITY_RANK.get(r.severity.value, 4) <= min_rank]

@@ -100,8 +100,15 @@ def _build_rules() -> list[Rule]:
             r'(?i)'
             # Variable name must contain a password-like keyword as a distinct segment
             # (word boundary or underscore/dot/dash separated), not as a substring
-            # of an unrelated word like "compass" or "bypass"
-            r'[\w.-]*(?:_|^|\.|-|"|\')(?:pass(?:word|wd|phrase)?|pwd|secret|credential|auth_?token)'
+            # of an unrelated word like "compass" or "bypass".
+            # Also excludes the policy/format suffixes (passwordFormat, passwordHash,
+            # passwordPolicy, …) that are configuration directives, not credentials.
+            r'[\w.-]*(?:_|^|\.|-|"|\')'
+            r'(?:pass(?:word|wd|phrase)?|pwd|secret|credential|auth_?token)'
+            r'(?!format|hash|encoding|policy|validator|expir|length|'
+            r'min|max|attempts|complexity|history|reset|recovery|strength|'
+            r'mode|type|kind|enabled|required|allowed|rotation|lockout|'
+            r'salt|hasher|provider|service|context|filter|builder|encoder)'
             r'[\w.-]*'
             r'\s*(?:=|:=?|=>|<-)\s*'
             r'(?:'
@@ -110,7 +117,7 @@ def _build_rules() -> list[Rule]:
             r'(?P<secret_unquoted>[^\s#;,\])}\\\x27"]{4,})'  # unquoted value
             r')',
         ),
-        min_entropy=2.0,
+        min_entropy=2.5,
         min_length=4,
         context_keywords=["password", "secret", "credential", "auth"],
         check_entropy=True,
@@ -118,7 +125,11 @@ def _build_rules() -> list[Rule]:
         fast_keywords=["password", "passwd", "passphrase", "pwd", "secret", "credential", "auth_token", "authtoken"],
     ))
 
-    # XML/HTML attribute passwords
+    # XML/HTML attribute passwords.
+    # Exclude attributes whose name has a non-secret suffix:
+    # passwordFormat, passwordHash, passwordEncoding, passwordPolicy,
+    # passwordValidator, passwordExpiry, passwordLength, etc. — these
+    # are policy / schema directives, not credentials.
     rules.append(Rule(
         id="PASSWORD_XML_ATTR",
         name="Password in XML/HTML attribute",
@@ -126,7 +137,13 @@ def _build_rules() -> list[Rule]:
         severity=Severity.HIGH,
         description="Password or secret value in an XML/HTML attribute",
         pattern=re.compile(
-            r'(?i)(?:password|passwd|pwd|secret|credential)\s*=\s*"(?P<secret>[^"]{4,})"',
+            r'(?i)(?<![\w])(?:password|passwd|pwd|secret|credential)'
+            r'(?!format|hash|encoding|policy|validator|expiry|expir|length|'
+            r'min|max|attempts|complexity|history|reset|recovery|strength|'
+            r'mode|type|kind|style|state|status|enabled|required|allowed|'
+            r'rotation|lockout|salt|hasher|provider|store(?!_?(?:url|uri))|'
+            r'manager(?!_?key)|service|context|filter|builder|encoder)'
+            r'\s*=\s*"(?P<secret>[^"]{4,})"',
         ),
         min_entropy=2.0,
         min_length=4,
@@ -811,23 +828,30 @@ def _build_rules() -> list[Rule]:
     # 5. GENERIC / ENV PATTERNS
     # -----------------------------------------------------------------------
 
-    # Generic KEY= or TOKEN= or SECRET= in env files / shell
+    # Generic KEY= or TOKEN= or SECRET= in env files / shell.
+    # Restricted to uppercase env-var style on purpose: lowercase / CamelCase
+    # variable names (`Author`, `SearchKey`, `ProxyCredential`) are caught by
+    # the language-specific rules below and shouldn't trigger this generic
+    # ENV rule. Case-insensitive matching here was responsible for ~30%
+    # of the false positives seen on real Windows boxes.
     rules.append(Rule(
         id="ENV_SECRET_ASSIGNMENT",
         name="Secret in environment variable",
         category=Category.ENV_SECRET,
         severity=Severity.HIGH,
-        description="Environment variable assignment with secret-like name",
+        description="Environment variable assignment with secret-like name (uppercase)",
         pattern=re.compile(
-            r'(?i)^(?:export\s+)?'
-            r'(?P<varname>[A-Z_]*(?:SECRET|TOKEN|API[_-]?KEY|AUTH|CREDENTIAL|PASSWORD|PASSWD|PWD)[A-Z_]*)'
+            r'^(?:export\s+)?'
+            r'(?P<varname>[A-Z][A-Z0-9_]*'
+            r'(?:SECRET|TOKEN|API[_-]?KEY|AUTH_TOKEN|AUTH_KEY|CREDENTIAL|PASSWORD|PASSWD|PWD)'
+            r'[A-Z0-9_]*)'
             r'\s*=\s*["\']?(?P<secret>[^\s"\'#]{4,})["\']?',
             re.MULTILINE,
         ),
         min_entropy=2.5,
         min_length=4,
         tags=["env", "secret"],
-        fast_keywords=["SECRET", "TOKEN", "API_KEY", "APIKEY", "AUTH", "CREDENTIAL", "PASSWORD", "PASSWD", "PWD"],
+        fast_keywords=["SECRET", "TOKEN", "API_KEY", "APIKEY", "AUTH_TOKEN", "CREDENTIAL", "PASSWORD", "PASSWD", "PWD"],
     ))
 
     # Bearer tokens in code
@@ -862,7 +886,10 @@ def _build_rules() -> list[Rule]:
         fast_keywords=["://"],
     ))
 
-    # Base64-encoded secrets (long base64 in assignment context)
+    # Base64-encoded secrets (long base64 in assignment context).
+    # Excludes assembly `publicKey="..."` blobs in .NET config / web.config
+    # (those are public RSA signing keys for strong-name verification, not
+    # secrets) and code-signing certificate fingerprints.
     rules.append(Rule(
         id="BASE64_SECRET",
         name="Base64-encoded secret value",
@@ -870,11 +897,16 @@ def _build_rules() -> list[Rule]:
         severity=Severity.MEDIUM,
         description="Likely base64-encoded secret in variable assignment",
         pattern=re.compile(
-            r'(?i)(?:secret|key|token|password|credential|cert)\s*[=:]\s*["\']?'
+            r'(?i)(?<!public)(?:secret|key|token|password|credential|cert)'
+            r'(?!\s*=\s*["\'](?:false|true|none|null))'
+            r'\s*[=:]\s*["\']?'
             r'(?P<secret>[A-Za-z0-9+/]{40,}={0,2})["\']?',
         ),
         min_entropy=4.0,
         min_length=40,
+        false_positive_indicators=list(_DEFAULT_FP_INDICATORS) + [
+            "publickey", "public_key", "publickeytoken",
+        ],
         tags=["base64", "encoded"],
         fast_keywords=["secret", "key", "token", "password", "credential", "cert"],
     ))
@@ -980,7 +1012,11 @@ def _build_rules() -> list[Rule]:
     # 9. CLOUD / INFRA SPECIFIC
     # -----------------------------------------------------------------------
 
-    # Terraform variables with default secrets
+    # Terraform variables with default secrets.
+    # Tightened from the original "any value=..." form (which matched every
+    # XML attribute on the planet). Now anchors on a `default = "..."` line
+    # at the start of a line, with high entropy + minimum 16 chars.
+    # Generic XML <attribute value="..."> no longer triggers this rule.
     rules.append(Rule(
         id="TERRAFORM_SECRET",
         name="Terraform Secret Variable",
@@ -988,13 +1024,14 @@ def _build_rules() -> list[Rule]:
         severity=Severity.HIGH,
         description="Terraform variable with sensitive default value",
         pattern=re.compile(
-            r'(?i)(?:default|value)\s*=\s*"(?P<secret>[^"]{8,})"',
+            r'(?im)^\s{0,4}default\s*=\s*"(?P<secret>[^"]{16,})"',
         ),
-        min_entropy=3.5,
-        min_length=8,
-        context_keywords=["password", "secret", "key", "token", "credential"],
+        min_entropy=4.0,
+        min_length=16,
+        context_keywords=["password", "secret", "key", "token", "credential",
+                          "variable", "sensitive"],
         tags=["terraform", "iac"],
-        fast_keywords=["default", "value"],
+        fast_keywords=["default"],
     ))
 
     # Kubernetes Secret (base64 in YAML)
@@ -1014,7 +1051,10 @@ def _build_rules() -> list[Rule]:
         fast_keywords=["password:", "token:", "secret:", "key:", "cert:"],
     ))
 
-    # Docker / docker-compose environment secrets
+    # Docker / docker-compose environment secrets.
+    # Uppercase-only on purpose — same reasoning as ENV_SECRET_ASSIGNMENT.
+    # Without the case-restriction, this matches `SearchKey = $Package.Name`
+    # and `Credentials = credentials;` inside C#/PowerShell on a real box.
     rules.append(Rule(
         id="DOCKER_ENV_SECRET",
         name="Docker Environment Secret",
@@ -1022,7 +1062,10 @@ def _build_rules() -> list[Rule]:
         severity=Severity.HIGH,
         description="Secret passed as environment variable in Docker config",
         pattern=re.compile(
-            r'(?im)^\s*-?\s*(?P<varname>[A-Z_]*(?:PASSWORD|SECRET|TOKEN|KEY|CREDENTIAL)[A-Z_]*)'
+            r'(?m)^\s*-?\s*'
+            r'(?P<varname>[A-Z][A-Z0-9_]*'
+            r'(?:PASSWORD|SECRET|TOKEN|API[_-]?KEY|CREDENTIAL)'
+            r'[A-Z0-9_]*)'
             r'\s*=\s*(?P<secret>[^\s"\'#]{4,})',
         ),
         min_entropy=2.0,
@@ -1182,7 +1225,8 @@ def _build_rules() -> list[Rule]:
     ))
 
     # TOML password = "value"  (TOML uses # for comments; values are usually
-    # quoted, but unquoted basic values are also possible)
+    # quoted, but unquoted basic values are also possible). Excludes the
+    # passwordFormat / passwordHash / passwordPolicy family of directives.
     rules.append(Rule(
         id="PASSWORD_TOML_KEY",
         name="Password in TOML key",
@@ -1193,13 +1237,18 @@ def _build_rules() -> list[Rule]:
             r'(?im)^\s*'
             r'(?P<keyname>[\w.-]*'
             r'(?:pass(?:word|wd|phrase)?|pwd|secret|credential|api[_-]?key|'
-            r'auth[_-]?token|access[_-]?key)[\w.-]*)'
+            r'auth[_-]?token|access[_-]?key)'
+            r'(?!format|hash|encoding|policy|validator|expir|length|'
+            r'min|max|attempts|complexity|history|reset|recovery|strength|'
+            r'mode|type|kind|enabled|required|allowed|rotation|lockout|'
+            r'salt|hasher|provider|service|context|filter|builder|encoder)'
+            r'[\w.-]*)'
             r'\s*=\s*'
             r'(?:["\'](?P<secret>[^"\'\n]{4,})["\']'
             r'|(?P<secret_unquoted>[^\s"\'\n][^\s\n]{2,}[^\s\n]))'
             r'\s*(?:\s+#[^\n]*)?\s*$',
         ),
-        min_entropy=2.0,
+        min_entropy=2.5,
         min_length=4,
         tags=["password", "toml"],
         fast_keywords=["password", "passwd", "pwd", "secret", "credential",
@@ -1231,8 +1280,10 @@ def _build_rules() -> list[Rule]:
                        "api_key", "apikey", "auth_token", "authtoken"],
     ))
 
-    # Function/constructor call with password keyword arg
+    # Function/constructor call with password keyword arg.
     # connect(host, port, "user", "password")  /  Login(user="...", password="...")
+    # Excludes the same policy/format suffixes as PASSWORD_XML_ATTR
+    # (passwordFormat, passwordHash, passwordPolicy, passwordValidator, …).
     rules.append(Rule(
         id="PASSWORD_KWARG",
         name="Password as keyword argument",
@@ -1242,9 +1293,14 @@ def _build_rules() -> list[Rule]:
         pattern=re.compile(
             r'(?i)(?:[\w.]+\.)*\w*'
             r'(?:pass(?:word|wd|phrase)?|pwd|secret|credential)'
+            r'(?!format|hash|encoding|policy|validator|expiry|expir|length|'
+            r'min|max|attempts|complexity|history|reset|recovery|strength|'
+            r'mode|type|kind|style|state|status|enabled|required|allowed|'
+            r'rotation|lockout|salt|hasher|provider|service|context|filter|'
+            r'builder|encoder|manager(?!_?key))'
             r'\w*\s*=\s*["\'](?P<secret>[^"\'\\]{4,})["\']',
         ),
-        min_entropy=2.0,
+        min_entropy=2.5,
         min_length=4,
         tags=["password", "kwarg", "function_call"],
         fast_keywords=["password", "passwd", "passphrase", "pwd",
@@ -1473,7 +1529,11 @@ def _build_rules() -> list[Rule]:
     # → no new rule, UNIX_SHADOW_HASH is sufficient.
 
     # ── 12.3 Windows-specific idioms ───────────────────────────────────
-    # PowerShell variable: $password = "..."  /  $script:DBPass = '...'
+    # PowerShell variable: $password = "..."  /  $script:DBPass = '...'.
+    # Excludes the built-in automatic variable `$pwd` (current working
+    # directory) — `$pwd = $path` and `$old_pwd = $pwd` are file-system
+    # operations, not credentials. We require the varname to be longer
+    # than 3 chars OR contain a non-pwd keyword.
     rules.append(Rule(
         id="POWERSHELL_VAR_PASSWORD",
         name="PowerShell password variable assignment",
@@ -1482,15 +1542,23 @@ def _build_rules() -> list[Rule]:
         description="PowerShell `$variable = '...'` whose name contains a password keyword",
         pattern=re.compile(
             r'(?i)\$(?:script:|global:|local:|private:|env:)?'
-            r'(?P<varname>[\w]*'
-            r'(?:pass(?:word|wd|phrase)?|pwd|secret|credential|api[_-]?key|'
-            r'auth[_-]?token|access[_-]?key)[\w]*)'
+            r'(?P<varname>(?!pwd\b)(?!pwd\s*=)'  # exclude bare $pwd
+            r'[\w]*'
+            r'(?:pass(?:word|wd|phrase)|secret|credential|api[_-]?key|'
+            r'auth[_-]?token|access[_-]?key)'
+            r'[\w]*)'
             r'\s*=\s*'
             r'(?:["\'](?P<secret>[^"\'\n]{4,})["\']'
             r'|(?P<secret_unquoted>[^\s#;|`)\n]{4,}))',
         ),
-        min_entropy=2.0,
+        min_entropy=2.5,
         min_length=4,
+        false_positive_indicators=list(_DEFAULT_FP_INDICATORS) + [
+            "$null", "$true", "$false",
+            "getnetworkcredential", "credentialcache",
+            "$request.", "$package.", "$options[", "$result", "$path",
+            "$old_pwd", "$pwd",
+        ],
         tags=["password", "powershell", "windows"],
         fast_keywords=["$"],
     ))
@@ -1514,7 +1582,10 @@ def _build_rules() -> list[Rule]:
         fast_keywords=["pscredential", "convertto-securestring"],
     ))
 
-    # Batch: SET PASSWORD=foo  (with or without quotes, including `set "PWD=foo"`)
+    # Batch: SET PASSWORD=foo  (with or without quotes, including `set "PWD=foo"`).
+    # Uppercase-only for the keyword: avoids `set vgAuthCli=...` matching
+    # because `Auth` is a substring of `vgAuthCli` (real env vars are
+    # uppercase by convention in batch scripts).
     rules.append(Rule(
         id="BATCH_SET_PASSWORD",
         name="Batch SET with password",
@@ -1522,15 +1593,17 @@ def _build_rules() -> list[Rule]:
         severity=Severity.HIGH,
         description="Windows batch SET assigning a password-like environment variable",
         pattern=re.compile(
-            r'(?im)^\s*set\s+"?(?P<varname>[A-Z_]*'
+            r'(?m)^\s*[Ss][Ee][Tt]\s+"?'
+            r'(?P<varname>[A-Z][A-Z0-9_]*'
             r'(?:PASS(?:WORD|WD|PHRASE)?|PWD|SECRET|TOKEN|CREDENTIAL|API[_-]?KEY|'
-            r'AUTH|ACCESS[_-]?KEY)[A-Z_]*)'
+            r'AUTH_TOKEN|AUTH_KEY|ACCESS[_-]?KEY)'
+            r'[A-Z0-9_]*)'
             r'=(?P<secret>[^"\n]{3,})"?\s*$',
         ),
         min_entropy=1.5,
         min_length=3,
         tags=["password", "batch", "windows"],
-        fast_keywords=["set ", "set\t"],
+        fast_keywords=["set ", "set\t", "SET ", "SET\t"],
     ))
 
     # cmdkey: cmdkey /add:<target> /user:<user> /pass:<password>
@@ -1858,12 +1931,15 @@ def _build_rules() -> list[Rule]:
         severity=Severity.CRITICAL,
         description="Apache htpasswd entry: user:hash",
         pattern=re.compile(
-            r'(?m)^(?P<user>[^:\s#][^:\s]*)\s*:\s*'
+            # Anchored end-of-line so PowerShell expressions like
+            # `$script:ProxyCredential = 'ProxyCredential'` (which would
+            # otherwise match a 13-char DES-shaped substring) are skipped.
+            r'(?m)^(?P<user>[^:\s#=][^:\s=]*)\s*:\s*'
             r'(?P<secret>(?:'
             r'\$(?:apr1|2a|2b|2y|5|6|y)\$[^\s:]{8,}'  # bcrypt/MD5/SHA-512 crypt
             r'|\{SHA\}[A-Za-z0-9+/=]{20,}'             # ldap-style SHA1
             r'|[A-Za-z0-9./]{13}'                      # legacy DES (13 chars)
-            r'))',
+            r'))\s*$',
         ),
         min_entropy=2.0,
         min_length=13,

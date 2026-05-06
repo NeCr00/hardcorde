@@ -162,7 +162,10 @@ PLACEHOLDER_PATTERNS: list[re.Pattern] = [
     re.compile(r'^(abc|123|test_?|example_?|sample_?|dummy_?|fake_?|temp_?)', re.IGNORECASE),
     re.compile(r'^(password|changeme|admin|root|guest|default)$', re.IGNORECASE),
     re.compile(r'^\$\{.*\}$'),       # ${VARIABLE}
-    re.compile(r'^\$\(.*\)$'),       # $(command)
+    re.compile(r'^\$\(.*\)$'),       # $(command) — PS subexpression / shell
+    re.compile(r'^"\$\(.*\)"$'),     # "$(Get-Random)" quoted PS subexpr
+    re.compile(r'^@\(.*\)$'),        # @(...) PS array
+    re.compile(r'^\$[a-zA-Z_][\w.]*(?:\[[^\]]*\])?$'),  # $variable / $obj.prop / $arr[0]
     re.compile(r'^%.*%$'),           # %VARIABLE%
     re.compile(r'^\{\{.*\}\}$'),     # {{template}}
     re.compile(r'^<[^>]+>$'),        # <placeholder>
@@ -229,10 +232,84 @@ VALUE_ALLOWLIST: frozenset[str] = frozenset({
     # Django/framework constant names that contain "password"
     "auth_password_validators", "password_hashers",
     "password_reset_timeout", "password_validators",
+    # Password-policy / format directives (from .NET machine.config etc.) —
+    # these are how the password is *handled*, not the password itself.
+    "hashed", "encrypted", "clear", "cleartext", "plaintext",
+    "sha", "sha1", "sha256", "sha512", "md5", "bcrypt", "pbkdf2",
+    "argon2", "argon2i", "argon2d", "argon2id", "scrypt",
+    "autogenerate", "auto-generate", "auto", "automatic",
+    "disabled", "enabled", "required", "optional", "prohibited",
+    "framework20", "framework40", "framework45", "framework20sp1",
+    "framework20sp2", "predictable", "unspecified",
+    # XML schema enumeration / constraint values that look like words
+    "qualified", "unqualified", "preserve", "collapse", "replace",
+    "extension", "restriction", "substitution", "list", "union",
+    "minlength", "maxlength", "minlnclusive", "maxinclusive",
+    "minexclusive", "maxexclusive", "minimum", "maximum",
+    "totaldigits", "fractiondigits", "whitespace", "minscale", "maxscale",
+    "ordered", "bounded", "cardinality", "numeric", "enumeration",
+    "indeterminate", "deny", "permit",
+    "unbounded",
+    # Common module manifest fields
+    "microsoft", "microsoft corporation", "pester", "pester team",
+    # PowerShell built-ins / common refs
+    "$null", "$true", "$false", "$pwd", "$path", "$old_pwd",
+    "$result", "$request", "$response", "$options", "$credential",
+    "passed", "failed", "skipped", "pending",
+    # Constant-name string values seen in real .NET / PowerShell code
+    "value", "data", "result", "input", "output",
+    "options", "settings", "config", "context", "request", "response",
+    "credentials", "credential", "token", "tokens",  # self-reference cases
 })
+
+# Patterns that, when they match the secret value, are *never* credentials.
+# These short-circuit the entire confidence calculation to 0.
+_HARD_NON_CREDENTIAL: list[re.Pattern] = [
+    re.compile(r'^\$\(.*\)$'),                # PowerShell / shell subexpression
+    re.compile(r'^"\$\(.*\)"$'),              # quoted PS subexpression
+    re.compile(r'^@\(.*\)$'),                 # PS array literal
+    re.compile(r'^@\{.*\}$', re.DOTALL),      # PS hashtable literal
+    re.compile(r'^\$\{.*\}$'),                # ${VAR} interpolation
+    re.compile(r'^%[A-Z_][A-Z0-9_]*%$'),      # %WINDIR% style
+    re.compile(r'^\$[a-zA-Z_][\w.]*(?:\[[^\]]*\])?\.?[\w.]*$'),  # $var / $obj.prop
+]
 
 # Patterns for shadow file metadata fields that aren't passwords
 _SHADOW_METADATA_RE = re.compile(r'^\d+:\d+:\d+:\d+:{0,3}$')
+
+
+_NL_WORDS_RE = re.compile(r'\b[A-Za-z]{2,}\b')
+
+
+def _looks_like_natural_language(value: str) -> bool:
+    """
+    Heuristic: a value is probably a translation string, error message,
+    or documentation snippet (not a credential) when it contains multiple
+    distinct alphabetic words separated by spaces. Real credentials almost
+    never contain ASCII whitespace, and password policies disallow it.
+
+    Triggers when:
+      - 3+ space-separated alphabetic words, AND
+      - average word length is reasonable (3-12 chars), AND
+      - no token > 30 chars (which would suggest a base64 / hex blob), AND
+      - at least one word is lowercase (translations have lowercase words;
+        protocol markers like "BEGIN RSA PRIVATE KEY" are all uppercase
+        and should NOT trigger this).
+    """
+    if " " not in value:
+        return False
+    # PEM / OpenSSH banner — never natural language
+    if value.startswith("-----") or value.startswith("BEGIN "):
+        return False
+    words = _NL_WORDS_RE.findall(value)
+    if len(words) < 3:
+        return False
+    if any(len(w) > 30 for w in words):
+        return False
+    if not any(w.islower() for w in words):
+        return False
+    avg = sum(len(w) for w in words) / len(words)
+    return 2.5 <= avg <= 12
 
 
 def _is_placeholder(value: str) -> bool:
@@ -248,6 +325,9 @@ def _is_placeholder(value: str) -> bool:
         return True
     # Shadow file metadata fields (e.g., "19000:0:99999:7:::")
     if _SHADOW_METADATA_RE.match(v):
+        return True
+    # Translation strings / English-sentence values — not credentials
+    if _looks_like_natural_language(v):
         return True
     return False
 
@@ -287,9 +367,38 @@ def compute_confidence(
     score = 50  # Base score
 
     secret_clean = secret_value.strip().strip("'\"")
+    # Strip common trailing-statement punctuation: `value;` / `value,` / `value.`
+    # so the allowlist + self-reference checks below see the actual token.
+    secret_normalized = secret_clean.rstrip(";,.").strip()
+    entropy = shannon_entropy(secret_clean)
+
+    # ── Hard short-circuits — these are never credentials ──────────────
+    # Natural-language sentence (translation strings, error messages, docs).
+    # Real passwords don't contain spaces and aren't English prose.
+    if _looks_like_natural_language(secret_clean):
+        breakdown["natural_language"] = -100
+        return 0, entropy, breakdown
+    # Allowlisted constant — `Hashed`, `SHA1`, `AutoGenerate`, `Microsoft`,
+    # `Pester`, `value`, etc. Always non-credentials.
+    if secret_normalized.lower() in VALUE_ALLOWLIST:
+        breakdown["value_allowlisted"] = -100
+        return 0, entropy, breakdown
+    # Hard non-credential patterns (PS subexpressions, env-var refs, etc.)
+    for _hpat in _HARD_NON_CREDENTIAL:
+        if _hpat.match(secret_normalized):
+            breakdown["non_credential_pattern"] = -100
+            return 0, entropy, breakdown
+    # Self-reference: `Credential = "Credential"` — value matches a token
+    # appearing before the `=` (typically the variable name).
+    if rule.id in {"PASSWORD_KWARG", "PASSWORD_ASSIGNMENT", "POWERSHELL_VAR_PASSWORD",
+                   "PHP_VAR_PASSWORD", "PASSWORD_TOML_KEY", "PASSWORD_JS_UNQUOTED_KEY",
+                   "TYPED_LANG_PASSWORD"}:
+        head = line.split("=", 1)[0] if "=" in line else ""
+        if secret_normalized and secret_normalized.lower() in head.lower():
+            breakdown["self_reference"] = -100
+            return 0, entropy, breakdown
 
     # ------ 1. Entropy scoring ------
-    entropy = shannon_entropy(secret_clean)
     if rule.check_entropy:
         if entropy >= 4.5:
             breakdown["entropy_high"] = 20

@@ -230,6 +230,14 @@ Examples:
                       help="Only run these rule IDs.")
     filt.add_argument("--exclude-rules", nargs="+", metavar="ID",
                       help="Exclude these rule IDs.")
+    filt.add_argument(
+        "--passwords-only", action="store_true",
+        help="Restrict scanning to actual hardcoded passwords (and password "
+             "hashes / connection strings with embedded passwords). Skips API "
+             "keys, OAuth tokens, JWTs, bearer tokens, PEM private keys, "
+             "generic high-entropy secrets, and credential-store / filename "
+             "discovery — exactly what a pentester wants when they only care "
+             "about password material.")
 
     # ── Tuning ──
     tune = p.add_argument_group("tuning options")
@@ -404,7 +412,15 @@ def main(argv: list[str] = None) -> int:
         if do_target:            active.append(f"scan-target={args.target}")
         if do_cred_stores:       active.append("cred-stores")
         if do_filename_patterns: active.append("filename-patterns")
-        sys.stderr.write(_c(Colors.DIM, f"  Active checks: {', '.join(active)}\n\n", use_color))
+        sys.stderr.write(_c(Colors.DIM, f"  Active checks: {', '.join(active)}\n", use_color))
+        if args.passwords_only:
+            sys.stderr.write(_c(
+                Colors.DIM,
+                "  Mode: --passwords-only (skipping API keys, tokens, JWTs, "
+                "PEM keys, env-secrets, cred-store / filename discovery)\n",
+                use_color,
+            ))
+        sys.stderr.write("\n")
 
     # ── Build base scan config ───────────────────────────────────────
     ext_override = _parse_ext_list(args.ext) if args.ext else frozenset()
@@ -433,7 +449,15 @@ def main(argv: list[str] = None) -> int:
         categories=args.category,
         tags=args.tags,
         severity_min=args.severity,
+        passwords_only=args.passwords_only,
     )
+
+    # --passwords-only also disables cred-store / filename-pattern discovery:
+    # those flag *files* that *might* hold credentials, not actual hardcoded
+    # password content. The user asked for actual passwords only.
+    if args.passwords_only:
+        do_cred_stores = False
+        do_filename_patterns = False
 
     progress = _progress_printer(args.quiet, use_color)
 
@@ -512,6 +536,7 @@ def main(argv: list[str] = None) -> int:
                 categories=base_engine_config.categories,
                 tags=base_engine_config.tags,
                 severity_min=base_engine_config.severity_min,
+                passwords_only=base_engine_config.passwords_only,
             )
 
             if not args.quiet:
