@@ -123,6 +123,10 @@ HIGH_VALUE_EXTENSIONS: frozenset[str] = frozenset({
     ".ftpconfig", ".unattend", ".inf", ".gpp",         # Windows deploy
     ".publishsettings",
     ".tnsnames", ".ora",                               # Oracle
+    ".keytab",                                          # Kerberos keytab (binary, but flagged for review)
+    ".rdg",                                             # Microsoft Remote Desktop Group (cached creds)
+    ".sdb",                                             # SAP / misc credential databases
+    ".pcap", ".pcapng",                                 # packet captures (auth flows)
 })
 
 # Filenames (basename only, no path components) that are high-value
@@ -240,6 +244,30 @@ HIGH_VALUE_FILENAMES: frozenset[str] = frozenset({
     "phpinfo.php",                                         # leaks env vars
     "info.php",
     "phpunit.xml",                                         # often has DB creds
+    # ── Directory services / auth servers ──────────────────────────────
+    "slapd.conf", "slapd.d",                                # OpenLDAP
+    "krb5.conf", "krb5.keytab",                             # Kerberos (binary keytab still flagged by name)
+    "smb.conf", "smbusers", "secrets.tdb",                  # Samba
+    "freeradius.conf", "radiusd.conf", "clients.conf",      # FreeRADIUS
+    "users",                                                # FreeRADIUS users file
+    # ── Oracle ─────────────────────────────────────────────────────────
+    "tnsnames.ora", "sqlnet.ora", "listener.ora",
+    "wallet.sso", "cwallet.sso", "ewallet.p12",
+    # ── HashiCorp / Cloud-native ───────────────────────────────────────
+    ".vault-token",                                         # vault CLI cached token
+    "vault.hcl", "consul.hcl", "nomad.hcl",
+    # ── Ansible ────────────────────────────────────────────────────────
+    "ansible.cfg", ".vault_pass", "vault_pass.txt",
+    "vault-password.txt", ".vault-password",
+    # ── CI / VCS ───────────────────────────────────────────────────────
+    ".git-credentials", ".gitlab-ci.yml", ".travis.yml",
+    ".drone.yml", "bitbucket-pipelines.yml",
+    "Jenkinsfile", "Tiltfile",
+    # ── Windows additions ──────────────────────────────────────────────
+    "ConsoleHost_history.txt",                              # PSReadLine
+    "Cred.xml", "credentials.xml",                          # Export-Clixml dumps
+    "WSL.conf", "wsl.conf",
+    "fstab",                                                # Linux fstab — cifs creds
 })
 
 # Parent directory names that make a file high-value regardless of filename
@@ -255,6 +283,12 @@ HIGH_VALUE_PARENT_DIRS: frozenset[str] = frozenset({
     "PSReadLine",                                          # PowerShell history
     "Sysprep", "Panther", "unattend",                      # Windows deploy
     "PuTTY", "WinSCP",
+    "freeradius", "openldap", "slapd.d",                   # auth servers
+    "krb5cc",                                              # Kerberos credential caches
+    ".oh-my-zsh", "powerlevel10k",                         # shell rc may contain exports
+    "vault", ".vault",                                     # HashiCorp vault config
+    "ansible",                                             # Ansible roles/playbooks
+    "rclone",                                              # rclone config dir
 })
 
 # Directories to always skip (basename only — no path separators)

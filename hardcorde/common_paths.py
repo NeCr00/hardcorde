@@ -97,6 +97,41 @@ _WIN_TARGETS: list[ScanTarget] = [
                max_depth=3, high_value_only=True),
     ScanTarget("C:\\Users\\*\\Downloads", "user_files", "User downloads", 3,
                max_depth=2, high_value_only=True),
+
+    # 10. PowerShell profile + cached credentials (Export-Clixml dumps)
+    ScanTarget("C:\\Users\\*\\Documents\\WindowsPowerShell", "powershell_profile",
+               "PowerShell profile + saved cred xml", 1, max_depth=3),
+    ScanTarget("C:\\Users\\*\\Documents\\PowerShell", "powershell_profile",
+               "PS Core profile", 1, max_depth=3),
+
+    # 11. WSL config & credentials
+    ScanTarget("C:\\Users\\*\\.wslconfig", "user_files", "WSL config", 2, max_depth=0),
+    ScanTarget("C:\\Users\\*\\AppData\\Local\\Packages\\CanonicalGroupLimited*",
+               "user_files", "WSL distro file roots", 3, max_depth=4, high_value_only=True),
+
+    # 12. HashiCorp / IaC token caches
+    ScanTarget("C:\\Users\\*\\.vault-token", "cloud_creds",
+               "HashiCorp Vault cached token", 1, max_depth=0),
+    ScanTarget("C:\\Users\\*\\AppData\\Roaming\\rclone", "cloud_creds",
+               "rclone config", 1, max_depth=2),
+
+    # 13. Common third-party SSH / RDP / VPN client storage
+    ScanTarget("C:\\Users\\*\\AppData\\Roaming\\SuperPuTTY", "remote_access",
+               "SuperPuTTY saved sessions", 2, max_depth=2),
+    ScanTarget("C:\\Users\\*\\AppData\\Roaming\\Bitvise", "remote_access",
+               "Bitvise SSH client profiles", 2, max_depth=2),
+    ScanTarget("C:\\Users\\*\\AppData\\Roaming\\KiTTY", "remote_access",
+               "KiTTY (PuTTY fork) sessions", 2, max_depth=2),
+    ScanTarget("C:\\Users\\*\\AppData\\Roaming\\TeraTerm", "remote_access",
+               "TeraTerm config", 2, max_depth=2),
+    ScanTarget("C:\\Users\\*\\AppData\\Local\\Microsoft\\Remote Desktop Connection Manager",
+               "remote_access", "RDCMan saved connections", 1, max_depth=2),
+
+    # 14. SCCM / Group Policy on the local machine (if it's a DC / member)
+    ScanTarget("C:\\Windows\\SYSVOL\\sysvol", "domain", "SYSVOL (GPP / scripts)",
+               1, max_depth=8, high_value_only=True),
+    ScanTarget("C:\\ProgramData\\Microsoft\\Group Policy\\History",
+               "domain", "Cached GPO history", 2, max_depth=4),
 ]
 
 
@@ -195,6 +230,35 @@ _LINUX_TARGETS: list[ScanTarget] = [
     ScanTarget("/tmp", "temp", "Temp directory", 3, max_depth=2, high_value_only=True),
     ScanTarget("/var/tmp", "temp", "Persistent temp", 3, max_depth=2, high_value_only=True),
     ScanTarget("/dev/shm", "temp", "Shared memory", 3, max_depth=2, high_value_only=True),
+
+    # 12. Auth / directory-service configs
+    ScanTarget("/etc/openldap", "auth_server", "OpenLDAP server config", 1, max_depth=2),
+    ScanTarget("/etc/ldap", "auth_server", "OpenLDAP client config", 1, max_depth=2),
+    ScanTarget("/etc/krb5.conf", "auth_server", "Kerberos client config", 1, max_depth=0),
+    ScanTarget("/etc/krb5.keytab", "auth_server", "System Kerberos keytab", 1, max_depth=0),
+    ScanTarget("/etc/samba", "auth_server", "Samba config + secrets.tdb", 1, max_depth=2),
+    ScanTarget("/etc/freeradius", "auth_server", "FreeRADIUS config", 1, max_depth=3),
+    ScanTarget("/etc/raddb", "auth_server", "FreeRADIUS alt config", 1, max_depth=3),
+    ScanTarget("/etc/pam.d", "auth_server", "PAM modules config", 2, max_depth=1),
+
+    # 13. Mount / fstab credentials references
+    ScanTarget("/etc/fstab", "system_creds", "Mount table (cifs creds= references)", 1, max_depth=0),
+    ScanTarget("/etc/.smbcredentials", "system_creds", "SMB credentials file", 1, max_depth=0),
+    ScanTarget("/etc/samba/.smbcredentials", "system_creds", "SMB credentials file", 1, max_depth=0),
+    ScanTarget("/root/.smbcredentials", "system_creds", "Root SMB credentials file", 1, max_depth=0),
+    ScanTarget("/home/*/.smbcredentials", "system_creds", "User SMB credentials file", 1, max_depth=0),
+
+    # 14. HashiCorp / IaC tool caches
+    ScanTarget("/home/*/.vault-token", "cloud_creds", "HashiCorp Vault cached token", 1, max_depth=0),
+    ScanTarget("/root/.vault-token", "cloud_creds", "Root Vault cached token", 1, max_depth=0),
+    ScanTarget("~/.vault-token", "cloud_creds", "Current user Vault token", 1, max_depth=0),
+    ScanTarget("/home/*/.config/rclone", "cloud_creds", "rclone config (encrypted creds)", 1, max_depth=2),
+    ScanTarget("/root/.config/rclone", "cloud_creds", "Root rclone config", 1, max_depth=2),
+    ScanTarget("~/.config/rclone", "cloud_creds", "Current user rclone config", 1, max_depth=2),
+
+    # 15. Oracle homes (commonly under /opt/oracle or $ORACLE_HOME)
+    ScanTarget("/opt/oracle", "app_config", "Oracle install (tnsnames/wallet)", 2, max_depth=5, high_value_only=True),
+    ScanTarget("/u01/app/oracle", "app_config", "Oracle install (alt path)", 2, max_depth=5, high_value_only=True),
 ]
 
 

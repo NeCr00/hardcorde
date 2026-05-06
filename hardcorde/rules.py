@@ -209,15 +209,25 @@ def _build_rules() -> list[Rule]:
         fast_keywords=["-p ", "--password", "--passwd", "--secret"],
     ))
 
-    # net user command with inline password
+    # net user command with inline password.
+    # Forms covered:
+    #   net user alice P@ss /add
+    #   net user alice P@ss /add /domain
+    #   net user alice P@ss                       (password change, no /add)
+    #   net user alice P@ss /active:yes /expires:never
+    # Excludes:
+    #   net user alice * /add                     ('*' = interactive prompt)
+    #   net user alice                            (no password token)
     rules.append(Rule(
         id="NET_USER_PASSWORD",
         name="net user command with password",
         category=Category.PASSWORD,
         severity=Severity.CRITICAL,
-        description="Windows net user command with inline password",
+        description="Windows net user command with inline password (add or change)",
         pattern=re.compile(
-            r'(?i)net\s+user\s+\S+\s+(?P<secret>[^\s/]{3,})\s+/add',
+            r'(?i)\bnet\s+user\s+(?P<account>[^\s/*]+)\s+'
+            r'(?P<secret>(?!\*\s)(?!\*$)[^\s/][^\s/]{2,})'
+            r'(?=\s+/|\s*$|\s+\S)',
         ),
         min_entropy=1.0,
         min_length=3,
@@ -2026,7 +2036,11 @@ def _build_rules() -> list[Rule]:
         severity=Severity.HIGH,
         description="Authorization: Basic <base64> header (decode for credentials)",
         pattern=re.compile(
-            r'(?i)Authorization\s*:\s*Basic\s+(?P<secret>[A-Za-z0-9+/=]{8,})',
+            # `Authorization: Basic <b64>` (HTTP header line)
+            # `Authorization="Basic <b64>"` (PowerShell hashtable)
+            # `"Authorization": "Basic <b64>"` (JSON header object)
+            r'(?i)["\']?Authorization["\']?\s*[:=]\s*["\']?Basic\s+'
+            r'(?P<secret>[A-Za-z0-9+/=]{8,})',
         ),
         min_entropy=2.5,
         min_length=8,
@@ -2429,6 +2443,770 @@ def _build_rules() -> list[Rule]:
         context_keywords=["smtp", "auth", "ehlo", "helo", "mail from"],
         tags=["password", "smtp"],
         fast_keywords=["auth plain", "auth login"],
+    ))
+
+    # =======================================================================
+    # 14. EXTENDED OS COVERAGE — odd-but-real-world idioms
+    # =======================================================================
+    #
+    # The patterns below extend Windows / Linux command-line and config
+    # coverage with idioms that show up on real engagements but the original
+    # rule set missed: schtasks /RP, sc config password=, smbclient -U
+    # user%pass, htpasswd -b, sudo -S <<<, ldapsearch -w, kubectl create
+    # secret --from-literal, vault kv put, aws configure set, etc.
+    #
+    # All of these use check_entropy=False because operators routinely use
+    # short or low-entropy passwords on real boxes (P@ss123!, summer2024,
+    # the-actual-domain-admin-password, …).
+
+    # ── 14.1 Windows: schtasks /create ... /RP <password> ──────────────
+    rules.append(Rule(
+        id="SCHTASKS_PASSWORD",
+        name="schtasks /RP inline password",
+        category=Category.PASSWORD,
+        severity=Severity.CRITICAL,
+        description="Windows schtasks.exe /create with inline /RP <password> for the run-as account",
+        pattern=re.compile(
+            r'(?i)\bschtasks(?:\.exe)?\b[^\n]*?'
+            r'\s/(?:rp|p)\s+["\']?(?P<secret>[^"\'\s/]{2,})["\']?',
+        ),
+        min_entropy=1.0,
+        min_length=2,
+        check_entropy=False,
+        false_positive_indicators=[],
+        context_keywords=["schtasks", "/create", "/ru", "/sc"],
+        tags=["password", "windows", "command", "scheduledtask"],
+        fast_keywords=["schtasks"],
+    ))
+
+    # ── 14.2 Windows: sc.exe config / create binPath= obj= password= ────
+    rules.append(Rule(
+        id="SC_SERVICE_PASSWORD",
+        name="sc.exe service password",
+        category=Category.PASSWORD,
+        severity=Severity.CRITICAL,
+        description="Windows sc.exe create/config service with inline password=<pass>",
+        pattern=re.compile(
+            r'(?i)\bsc(?:\.exe)?\s+(?:\\\\\S+\s+)?(?:create|config)\b[^\n]*?'
+            r'\bpassword\s*=\s*["\']?(?P<secret>[^"\'\s]{2,})["\']?',
+        ),
+        min_entropy=1.0,
+        min_length=2,
+        check_entropy=False,
+        false_positive_indicators=[],
+        tags=["password", "windows", "command", "service"],
+        fast_keywords=["sc create", "sc config", "sc.exe"],
+    ))
+
+    # ── 14.3 Windows: winrs /password:  /  WinRM hashtable @{Password=…}
+    rules.append(Rule(
+        id="WINRS_PASSWORD",
+        name="winrs / WinRM with inline password",
+        category=Category.PASSWORD,
+        severity=Severity.CRITICAL,
+        description="winrs invocation or WinRM hashtable with inline /password: or Password=",
+        pattern=re.compile(
+            r'(?i)(?:'
+            r'\bwinrs\b[^\n]*?/password\s*:\s*["\']?(?P<secret>[^"\'\s/]{2,})["\']?'
+            r'|@\{[^}]*\bpassword\s*=\s*["\'](?P<secret2>[^"\']{2,})["\']'
+            r')',
+        ),
+        min_entropy=1.0,
+        min_length=2,
+        check_entropy=False,
+        false_positive_indicators=[],
+        tags=["password", "windows", "command", "winrm", "lateral_movement"],
+        fast_keywords=["winrs", "@{", "password="],
+    ))
+
+    # ── 14.4 Windows: BITSAdmin /SetCredentials ─────────────────────────
+    rules.append(Rule(
+        id="BITSADMIN_PASSWORD",
+        name="BITSAdmin /SetCredentials password",
+        category=Category.PASSWORD,
+        severity=Severity.HIGH,
+        description="BITSAdmin /SetCredentials command with inline password",
+        pattern=re.compile(
+            r'(?i)\bbitsadmin(?:\.exe)?\b[^\n]*?'
+            r'/SetCredentials\b[^\n]*?\s'
+            r'(?P<secret>[^\s/][^\s]*)\s*$',
+        ),
+        min_entropy=1.5,
+        min_length=3,
+        check_entropy=False,
+        tags=["password", "windows", "command"],
+        fast_keywords=["bitsadmin"],
+    ))
+
+    # ── 14.5 Windows: vaultcmd /add /credentialtarget:… /password:… ─────
+    rules.append(Rule(
+        id="VAULTCMD_PASSWORD",
+        name="vaultcmd /password inline",
+        category=Category.PASSWORD,
+        severity=Severity.CRITICAL,
+        description="Windows vaultcmd /add with inline /password",
+        pattern=re.compile(
+            r'(?i)\bvaultcmd(?:\.exe)?\b[^\n]*?'
+            r'/password\s*:\s*["\']?(?P<secret>[^"\'\s/]{2,})["\']?',
+        ),
+        min_entropy=1.0,
+        min_length=2,
+        check_entropy=False,
+        false_positive_indicators=[],
+        tags=["password", "windows", "command"],
+        fast_keywords=["vaultcmd"],
+    ))
+
+    # ── 14.6 Windows: Set-ADAccountPassword -NewPassword (plaintext) ────
+    rules.append(Rule(
+        id="SET_ADACCOUNT_PASSWORD",
+        name="Set-ADAccountPassword inline plaintext",
+        category=Category.PASSWORD,
+        severity=Severity.CRITICAL,
+        description="PowerShell Set-ADAccountPassword with inline plaintext via ConvertTo-SecureString",
+        pattern=re.compile(
+            r'(?i)\bSet-ADAccountPassword\b[^\n]*?'
+            r'-NewPassword\s+\(\s*ConvertTo-SecureString\s+["\'](?P<secret>[^"\']{2,})["\']',
+        ),
+        min_entropy=1.0,
+        min_length=2,
+        check_entropy=False,
+        false_positive_indicators=[],
+        tags=["password", "windows", "powershell", "active_directory"],
+        fast_keywords=["set-adaccountpassword"],
+    ))
+
+    # ── 14.7 Windows: Add-VpnConnection / Set-VpnConnection -Password ───
+    rules.append(Rule(
+        id="VPN_CMDLET_PASSWORD",
+        name="VPN PowerShell cmdlet inline password",
+        category=Category.PASSWORD,
+        severity=Severity.HIGH,
+        description="Add-VpnConnection / Set-VpnConnection / Connect-VpnUser with inline -Password",
+        pattern=re.compile(
+            r'(?i)\b(?:Add|Set|Connect)-Vpn\w*\b[^\n]*?'
+            r'-Password\s+["\'](?P<secret>[^"\']{2,})["\']',
+        ),
+        min_entropy=1.0,
+        min_length=2,
+        check_entropy=False,
+        tags=["password", "windows", "powershell", "vpn"],
+        fast_keywords=["add-vpn", "set-vpn", "connect-vpn"],
+    ))
+
+    # ── 14.8 Windows / cross-platform: docker login -u u -p p / az login -p
+    rules.append(Rule(
+        id="DOCKER_LOGIN_PASSWORD",
+        name="docker / podman / az login inline password",
+        category=Category.PASSWORD,
+        severity=Severity.CRITICAL,
+        description="docker / podman / nerdctl / az login with -p / --password inline",
+        pattern=re.compile(
+            r'(?i)\b(?:docker|podman|nerdctl|az)\b[^\n]*?\blogin\b[^\n]*?'
+            r'(?:-p\s+|--password[=\s]+|--password-stdin)'
+            r'(?:["\'](?P<secret>[^"\'\s]{2,})["\']'
+            r'|(?P<secret_unquoted>[^\s"\'-][^\s"\']{1,}))?',
+        ),
+        min_entropy=1.0,
+        min_length=2,
+        check_entropy=False,
+        false_positive_indicators=[],
+        context_keywords=["docker", "podman", "registry", "login", "azure"],
+        tags=["password", "container", "registry", "command"],
+        fast_keywords=["docker login", "podman login", "nerdctl login", "az login"],
+    ))
+
+    # ── 14.9 Linux: smbclient -U user%password (very common in pentests)
+    rules.append(Rule(
+        id="SMBCLIENT_USER_PASS",
+        name="smbclient -U user%password",
+        category=Category.PASSWORD,
+        severity=Severity.CRITICAL,
+        description="smbclient / rpcclient / smbmap with -U user%password inline form",
+        pattern=re.compile(
+            r'(?i)\b(?:smbclient|rpcclient|smbmap|smbget|smbpasswd|smbcacls|'
+            r'smbtree|nmblookup|net\s+rpc)\b'
+            r'[^\n]*?'
+            r'\s-U\s+["\']?(?P<secret>[^\s"\'%@]+%[^\s"\']{2,})["\']?',
+        ),
+        min_entropy=1.5,
+        min_length=4,
+        check_entropy=False,
+        false_positive_indicators=[],
+        tags=["password", "linux", "smb", "command", "lateral_movement"],
+        fast_keywords=["smbclient", "rpcclient", "smbmap", "smbget",
+                       "smbpasswd", "smbcacls", "smbtree", "nmblookup",
+                       "net rpc"],
+    ))
+
+    # ── 14.10 Linux: htpasswd -b user password (inline create) ──────────
+    rules.append(Rule(
+        id="HTPASSWD_INLINE",
+        name="htpasswd -b inline user/password",
+        category=Category.PASSWORD,
+        severity=Severity.CRITICAL,
+        description="htpasswd -b <file> <user> <password> creating an entry inline",
+        pattern=re.compile(
+            r'(?i)\bhtpasswd\b[^\n]*?\s-b[\w]*\s+'
+            r'(?:\S+\s+)+'
+            r'(?P<secret>[^\s][^\s]{2,})\s*$',
+        ),
+        min_entropy=1.0,
+        min_length=3,
+        check_entropy=False,
+        false_positive_indicators=[],
+        tags=["password", "apache", "htpasswd", "command", "linux"],
+        fast_keywords=["htpasswd"],
+    ))
+
+    # ── 14.11 Linux: sudo -S <<< password / sudo --stdin ────────────────
+    rules.append(Rule(
+        id="SUDO_S_PASSWORD",
+        name="sudo -S piped password",
+        category=Category.PASSWORD,
+        severity=Severity.HIGH,
+        description="sudo -S / --stdin fed a password via heredoc, here-string, or echo pipe",
+        pattern=re.compile(
+            r'(?i)(?:'
+            r'\bsudo\s+(?:-S|--stdin)\b[^\n]*?<<<\s*["\']?(?P<secret>[^"\'\s|]{2,})["\']?'
+            r'|\becho\s+["\']?(?P<secret2>[^"\'\s|]{2,})["\']?\s*\|\s*sudo\s+(?:-S|--stdin)\b'
+            r')',
+        ),
+        min_entropy=1.0,
+        min_length=2,
+        check_entropy=False,
+        false_positive_indicators=[],
+        tags=["password", "linux", "sudo", "command"],
+        fast_keywords=["sudo -S", "sudo --stdin"],
+    ))
+
+    # ── 14.12 Linux: passwd --stdin user / chpasswd already covered ─────
+    rules.append(Rule(
+        id="PASSWD_STDIN",
+        name="passwd --stdin / passwd -p inline",
+        category=Category.PASSWORD,
+        severity=Severity.CRITICAL,
+        description="passwd --stdin <user> with piped password (Red Hat) or passwd -p hash",
+        pattern=re.compile(
+            r'(?i)(?:'
+            # echo "P" | passwd --stdin user
+            r'\becho\s+["\']?(?P<secret>[^"\'\s|]{2,})["\']?\s*\|\s*'
+            r'passwd\b[^\n]*?--stdin\s+\S+'
+            r'|'
+            # passwd --stdin user <<< "P"
+            r'\bpasswd\b[^\n]*?--stdin\s+\S+\s*<<<\s*["\']?'
+            r'(?P<secret2>[^"\'\s]{2,})["\']?'
+            r')',
+        ),
+        min_entropy=1.0,
+        min_length=2,
+        check_entropy=False,
+        false_positive_indicators=[],
+        tags=["password", "linux", "command"],
+        fast_keywords=["passwd --stdin", "passwd -p"],
+    ))
+
+    # ── 14.13 Linux: ldapsearch / ldapmodify -w <password> (short flag) ─
+    rules.append(Rule(
+        id="LDAP_CLI_PASSWORD",
+        name="ldapsearch / ldapmodify / ldapadd -w password",
+        category=Category.PASSWORD,
+        severity=Severity.CRITICAL,
+        description="OpenLDAP CLI tools with short -w <bindpw> flag",
+        pattern=re.compile(
+            r'(?i)\b(?:ldap(?:search|modify|add|delete|compare|moddn|passwd|whoami|url))\b'
+            r'[^\n]*?\s-w\s+'
+            r'(?:["\'](?P<secret>[^"\'\s]{2,})["\']'
+            r'|(?P<secret_unquoted>[^\s"\'-][^\s"\']{1,}))',
+        ),
+        min_entropy=1.0,
+        min_length=2,
+        check_entropy=False,
+        false_positive_indicators=[],
+        tags=["password", "ldap", "linux", "command"],
+        fast_keywords=["ldapsearch", "ldapmodify", "ldapadd",
+                       "ldapdelete", "ldapcompare", "ldapmoddn",
+                       "ldappasswd", "ldapwhoami", "ldapurl"],
+    ))
+
+    # ── 14.14 Linux: kinit user followed by here-string password ────────
+    rules.append(Rule(
+        id="KINIT_PASSWORD",
+        name="kinit piped password",
+        category=Category.PASSWORD,
+        severity=Severity.HIGH,
+        description="kinit <user> with password via echo/heredoc/here-string",
+        pattern=re.compile(
+            r'(?i)(?:'
+            r'\becho\s+["\']?(?P<secret>[^"\'\s|]{2,})["\']?\s*\|\s*kinit\b'
+            r'|\bkinit\b[^\n]*?<<<\s*["\']?(?P<secret2>[^"\'\s]{2,})["\']?'
+            r')',
+        ),
+        min_entropy=1.0,
+        min_length=2,
+        check_entropy=False,
+        tags=["password", "linux", "kerberos", "command"],
+        fast_keywords=["kinit"],
+    ))
+
+    # ── 14.15 Linux: iwconfig wlan0 key s:<passphrase> + wpa_passphrase
+    rules.append(Rule(
+        id="WIRELESS_KEY",
+        name="Wireless key in iwconfig / wpa_passphrase",
+        category=Category.PASSWORD,
+        severity=Severity.HIGH,
+        description="iwconfig key s:..., wpa_passphrase ssid pass, or iw connect key",
+        pattern=re.compile(
+            r'(?i)(?:'
+            # iwconfig wlan0 key s:passphrase  /  key 0123456789
+            r'\biwconfig\s+\S+\s+key\s+(?:s:)?(?P<secret>[^\s][^\s]{2,})'
+            r'|'
+            # wpa_passphrase essid "passphrase"  (or unquoted)
+            r'\bwpa_passphrase\s+\S+\s+'
+            r'(?:["\'](?P<secret2>[^"\']{2,})["\']'
+            r'|(?P<secret2_unquoted>[^\s][^\s]{2,}))'
+            r')',
+        ),
+        min_entropy=1.5,
+        min_length=3,
+        check_entropy=False,
+        tags=["password", "linux", "wireless", "command"],
+        fast_keywords=["iwconfig", "wpa_passphrase"],
+    ))
+
+    # ── 14.16 Linux: nmcli connection ... wifi-sec.psk <pass> (token form)
+    rules.append(Rule(
+        id="NMCLI_WIFI_PSK",
+        name="nmcli wifi-sec.psk inline",
+        category=Category.PASSWORD,
+        severity=Severity.HIGH,
+        description="nmcli connection with wifi-sec.psk / 802-1x.password as a positional token",
+        pattern=re.compile(
+            r'(?i)\bnmcli\b[^\n]*?'
+            r'\b(?:wifi-sec\.psk|802-1x\.password|802-1x\.ca-cert-password|vpn\.secrets|gsm\.password)\b'
+            r'\s+["\']?(?P<secret>[^"\'\s][^"\'\s]{2,})["\']?',
+        ),
+        min_entropy=1.5,
+        min_length=3,
+        check_entropy=False,
+        tags=["password", "linux", "wireless", "command"],
+        fast_keywords=["nmcli"],
+    ))
+
+    # ── 14.17 Linux: vncpasswd -f << / x11vnc -storepasswd ──────────────
+    rules.append(Rule(
+        id="VNC_INLINE_PASSWORD",
+        name="vncpasswd / x11vnc inline password",
+        category=Category.PASSWORD,
+        severity=Severity.HIGH,
+        description="vncpasswd or x11vnc -storepasswd invocation with inline plaintext",
+        pattern=re.compile(
+            r'(?i)(?:'
+            r'\bvncpasswd\b[^\n]*?<<<\s*["\']?(?P<secret>[^"\'\s]{2,})["\']?'
+            r'|\bx11vnc\s+(?:-storepasswd|-passwd)\s+'
+            r'(?:["\'](?P<secret2>[^"\']{2,})["\']'
+            r'|(?P<secret2_unquoted>[^\s"\'-][^\s"\']{1,}))'
+            r')',
+        ),
+        min_entropy=1.0,
+        min_length=2,
+        check_entropy=False,
+        tags=["password", "linux", "vnc", "command"],
+        fast_keywords=["vncpasswd", "x11vnc"],
+    ))
+
+    # ── 14.18 imapsync / offlineimap / fetchmail inline password ────────
+    rules.append(Rule(
+        id="MAIL_SYNC_PASSWORD",
+        name="imapsync / offlineimap / fetchmail inline password",
+        category=Category.PASSWORD,
+        severity=Severity.HIGH,
+        description="Mail-sync tool invocation with --password / --password1 / --password2",
+        pattern=re.compile(
+            r'(?i)\b(?:imapsync|offlineimap|fetchmail|getmail|mbsync|isync)\b'
+            r'[^\n]*?'
+            r'(?:--password[12]?|--passwd|-p)\s+'
+            r'(?:["\'](?P<secret>[^"\'\s]{2,})["\']'
+            r'|(?P<secret_unquoted>[^\s"\'-][^\s"\']{1,}))',
+        ),
+        min_entropy=1.0,
+        min_length=2,
+        check_entropy=False,
+        tags=["password", "linux", "mail", "command"],
+        fast_keywords=["imapsync", "offlineimap", "fetchmail",
+                       "getmail", "mbsync", "isync"],
+    ))
+
+    # ── 14.19 rclone config password / obscure ─────────────────────────
+    rules.append(Rule(
+        id="RCLONE_PASSWORD",
+        name="rclone obscure / config password",
+        category=Category.PASSWORD,
+        severity=Severity.HIGH,
+        description="rclone obscure <pass> or rclone config password <remote> <pass>",
+        pattern=re.compile(
+            r'(?i)\brclone\b[^\n]*?'
+            r'(?:'
+            r'\bobscure\s+["\']?(?P<secret>[^"\'\s]{2,})["\']?'
+            r'|\bconfig\s+password\s+\S+\s+["\']?(?P<secret2>[^"\'\s]{2,})["\']?'
+            r')',
+        ),
+        min_entropy=1.5,
+        min_length=3,
+        check_entropy=False,
+        tags=["password", "linux", "rclone", "command"],
+        fast_keywords=["rclone"],
+    ))
+
+    # ── 14.20 Oracle sqlplus user/password@db (slash form) ──────────────
+    rules.append(Rule(
+        id="SQLPLUS_SLASH_PASSWORD",
+        name="sqlplus user/password@db",
+        category=Category.PASSWORD,
+        severity=Severity.CRITICAL,
+        description="Oracle sqlplus / sqlcl with user/password@SID slash form",
+        pattern=re.compile(
+            r'(?i)\b(?:sqlplus|sql|sqlcl|exp|imp|expdp|impdp|rman)\b[^\n]*?\s'
+            r'(?P<secret>[A-Za-z][\w$#]*'
+            r'/[^\s/@"\']+@[\w./:-]+)',
+        ),
+        min_entropy=1.5,
+        min_length=6,
+        check_entropy=False,
+        context_keywords=["oracle", "sqlplus", "sysdba", "sysoper"],
+        tags=["password", "oracle", "command", "database"],
+        fast_keywords=["sqlplus", "rman ", "expdp", "impdp"],
+    ))
+
+    # ── 14.21 mosquitto / mqtt CLI inline password ──────────────────────
+    rules.append(Rule(
+        id="MQTT_PASSWORD",
+        name="mosquitto / mqtt CLI inline password",
+        category=Category.PASSWORD,
+        severity=Severity.HIGH,
+        description="mosquitto_pub / mosquitto_sub / mqtt invocation with -P password",
+        pattern=re.compile(
+            r'(?i)\b(?:mosquitto_(?:pub|sub|rr)|mqtt)\b[^\n]*?'
+            r'(?:\s-P\s+|\s--pw\s+|\s--password[=\s]+)'
+            r'(?:["\'](?P<secret>[^"\'\s]{2,})["\']'
+            r'|(?P<secret_unquoted>[^\s"\'-][^\s"\']{1,}))',
+        ),
+        min_entropy=1.0,
+        min_length=2,
+        check_entropy=False,
+        tags=["password", "mqtt", "command"],
+        fast_keywords=["mosquitto_pub", "mosquitto_sub", "mosquitto_rr",
+                       "mqtt "],
+    ))
+
+    # ── 14.22 GNOME secret-tool / Linux libsecret CLI ──────────────────
+    rules.append(Rule(
+        id="SECRET_TOOL_STORE",
+        name="secret-tool store inline",
+        category=Category.PASSWORD,
+        severity=Severity.HIGH,
+        description="secret-tool store invocation that pipes a password into libsecret",
+        pattern=re.compile(
+            r'(?i)\becho\s+["\']?(?P<secret>[^"\'\s|]{2,})["\']?\s*\|\s*'
+            r'secret-tool\s+store\b',
+        ),
+        min_entropy=1.5,
+        min_length=3,
+        check_entropy=False,
+        tags=["password", "linux", "command"],
+        fast_keywords=["secret-tool"],
+    ))
+
+    # ── 14.23 kubectl create secret generic --from-literal=password=… ───
+    rules.append(Rule(
+        id="KUBECTL_FROM_LITERAL",
+        name="kubectl --from-literal secret",
+        category=Category.PASSWORD,
+        severity=Severity.CRITICAL,
+        description="kubectl create secret with --from-literal containing password/token/key",
+        pattern=re.compile(
+            r'(?i)\bkubectl\b[^\n]*?\bcreate\s+secret\b[^\n]*?'
+            r'--from-literal[=\s]+'
+            r'(?P<keyname>[\w.-]*'
+            r'(?:pass(?:word|wd|phrase)?|pwd|secret|token|credential|api[_-]?key)'
+            r'[\w.-]*)'
+            r'\s*=\s*'
+            r'(?:["\'](?P<secret>[^"\']{2,})["\']'
+            r'|(?P<secret_unquoted>[^\s"\']{2,}))',
+        ),
+        min_entropy=1.5,
+        min_length=3,
+        check_entropy=False,
+        false_positive_indicators=[],
+        tags=["password", "kubernetes", "command"],
+        fast_keywords=["kubectl", "from-literal"],
+    ))
+
+    # ── 14.24 vault kv put / vault auth -method=… password=… ────────────
+    rules.append(Rule(
+        id="VAULT_KV_PUT",
+        name="vault kv put / vault auth password",
+        category=Category.PASSWORD,
+        severity=Severity.HIGH,
+        description="HashiCorp vault CLI kv put or auth login with inline password=",
+        pattern=re.compile(
+            r'(?i)\bvault\b[^\n]*?'
+            r'\b(?:kv\s+(?:put|patch)|write|auth)\b[^\n]*?\s'
+            r'(?P<keyname>[\w.-]*'
+            r'(?:password|passwd|pwd|secret|token|credential|api[_-]?key)'
+            r'[\w.-]*)'
+            r'=\s*'
+            r'(?:["\'](?P<secret>[^"\']{2,})["\']'
+            r'|(?P<secret_unquoted>[^\s"\']{2,}))',
+        ),
+        min_entropy=1.5,
+        min_length=3,
+        check_entropy=False,
+        tags=["password", "vault", "hashicorp", "command"],
+        fast_keywords=["vault"],
+    ))
+
+    # ── 14.25 aws configure set / az config set / gcloud config set ─────
+    rules.append(Rule(
+        id="CLOUD_CLI_CONFIGURE_SET",
+        name="aws/az/gcloud configure set inline secret",
+        category=Category.CLOUD_KEY,
+        severity=Severity.CRITICAL,
+        description="`aws configure set <key> <value>` (or az/gcloud equivalent) writing a credential",
+        pattern=re.compile(
+            r'(?i)\b(?:aws|az|gcloud|oci|doctl|ibmcloud)\b[^\n]*?'
+            r'\bconfigure?\s+set\b[^\n]*?\s'
+            r'(?P<keyname>[\w.-]*'
+            r'(?:secret|password|pwd|token|credential|access[_-]?key|api[_-]?key|'
+            r'client[_-]?secret|private[_-]?key)'
+            r'[\w.-]*)'
+            r'\s+'
+            r'(?:["\'](?P<secret>[^"\']{4,})["\']'
+            r'|(?P<secret_unquoted>[^\s"\']{4,}))',
+        ),
+        min_entropy=2.0,
+        min_length=4,
+        check_entropy=False,
+        tags=["password", "cloud", "command", "aws", "azure", "gcp"],
+        fast_keywords=["aws configure", "az configure", "gcloud config",
+                       "doctl auth", "ibmcloud config"],
+    ))
+
+    # ── 14.26 dotnet user-secrets set <key> <value> ─────────────────────
+    rules.append(Rule(
+        id="DOTNET_USER_SECRETS",
+        name="dotnet user-secrets set inline",
+        category=Category.PASSWORD,
+        severity=Severity.HIGH,
+        description="`dotnet user-secrets set` storing a password / connection string secret",
+        pattern=re.compile(
+            r'(?i)\bdotnet\s+user-secrets\s+set\b[^\n]*?\s'
+            r'(?:["\'](?P<keyname>[\w:.-]*'
+            r'(?:password|passwd|pwd|secret|token|credential|api[_-]?key|'
+            r'connectionstring|connectionstrings:[^"]+)'
+            r'[\w:.-]*)["\']'
+            r'|(?P<keyname_unquoted>[\w:.-]*'
+            r'(?:password|passwd|pwd|secret|token|credential|api[_-]?key|connectionstring)'
+            r'[\w:.-]*))'
+            r'\s+'
+            r'(?:["\'](?P<secret>[^"\']{2,})["\']'
+            r'|(?P<secret_unquoted>[^\s"\']{2,}))',
+        ),
+        min_entropy=2.0,
+        min_length=3,
+        check_entropy=False,
+        tags=["password", "dotnet", "command"],
+        fast_keywords=["dotnet user-secrets", "user-secrets set"],
+    ))
+
+    # ── 14.27 Helm: --set ...password=... or --set-string ──────────────
+    rules.append(Rule(
+        id="HELM_SET_PASSWORD",
+        name="helm --set password",
+        category=Category.PASSWORD,
+        severity=Severity.HIGH,
+        description="`helm install/upgrade --set <path>=<password>` inline credential",
+        pattern=re.compile(
+            r'(?i)\bhelm\b[^\n]*?'
+            r'--set(?:-string|-file)?(?:=|\s+)'
+            r'(?P<keyname>[\w.-]*'
+            r'(?:password|passwd|pwd|secret|token|credential|api[_-]?key|'
+            r'client[_-]?secret)'
+            r'[\w.-]*)'
+            r'\s*=\s*'
+            r'(?P<secret>[^\s,"\']{4,})',
+        ),
+        min_entropy=2.0,
+        min_length=4,
+        check_entropy=False,
+        tags=["password", "helm", "kubernetes", "command"],
+        fast_keywords=["helm", "--set"],
+    ))
+
+    # ── 14.28 OpenLDAP slapd.conf rootpw ───────────────────────────────
+    rules.append(Rule(
+        id="SLAPD_ROOTPW",
+        name="slapd.conf rootpw",
+        category=Category.PASSWORD,
+        severity=Severity.CRITICAL,
+        description="OpenLDAP slapd.conf rootpw directive (plaintext or hashed)",
+        pattern=re.compile(
+            r'(?im)^\s*(?:rootpw|olcRootPW)\s+'
+            r'(?P<secret>(?:\{[A-Z0-9]+\})?[^\s][^\s]{2,})\s*$',
+        ),
+        min_entropy=1.5,
+        min_length=3,
+        check_entropy=False,
+        false_positive_indicators=[],
+        tags=["password", "ldap", "linux", "config"],
+        fast_keywords=["rootpw", "olcrootpw"],
+    ))
+
+    # ── 14.29 FreeRADIUS clients.conf "secret = ..." ────────────────────
+    # Already partly caught by INI / generic rules but the "secret" alone
+    # without an obvious context might miss; this anchors on "client X {".
+    rules.append(Rule(
+        id="RADIUS_CLIENT_SECRET",
+        name="FreeRADIUS client shared secret",
+        category=Category.PASSWORD,
+        severity=Severity.CRITICAL,
+        description="FreeRADIUS clients.conf `secret = <shared-secret>` directive",
+        pattern=re.compile(
+            r'(?im)^\s*secret\s*=\s*'
+            r'(?P<secret>[^\s#"\'][^\s#]*)'
+            r'\s*(?:#.*)?$',
+        ),
+        min_entropy=2.0,
+        min_length=4,
+        check_entropy=True,
+        context_keywords=["client", "radius", "freeradius", "nas"],
+        tags=["password", "radius", "linux", "config"],
+        fast_keywords=["secret"],
+    ))
+
+    # ── 14.30 Cisco / Juniper "key 0 <passwd>" / "secret 0 <passwd>" ────
+    rules.append(Rule(
+        id="CISCO_KEY_STRING",
+        name="Cisco/Juniper key/secret string",
+        category=Category.PASSWORD,
+        severity=Severity.HIGH,
+        description="Cisco / Juniper config: key 0 <pass>, secret 0 <pass>, pre-shared-key <pass>",
+        pattern=re.compile(
+            r'(?im)^\s*(?:'
+            r'key(?:-string)?\s+(?:0|7)?\s+|'
+            r'pre-shared-key\s+(?:hexadecimal\s+|ascii\s+)?|'
+            r'snmp-server\s+community\s+'
+            r')(?P<secret>\S{3,})',
+        ),
+        min_entropy=1.5,
+        min_length=3,
+        check_entropy=False,
+        tags=["password", "cisco", "juniper", "network"],
+        fast_keywords=["key ", "pre-shared-key", "snmp-server community"],
+    ))
+
+    # ── 14.31 Oracle tnsnames.ora (PASSWORD = ...) ─────────────────────
+    rules.append(Rule(
+        id="TNSNAMES_PASSWORD",
+        name="Oracle tnsnames PASSWORD parameter",
+        category=Category.PASSWORD,
+        severity=Severity.CRITICAL,
+        description="Oracle tnsnames.ora / wallet config (PASSWORD = …) parameter",
+        pattern=re.compile(
+            r'(?i)\(\s*PASSWORD\s*=\s*(?P<secret>[^\s)]{2,})\s*\)',
+        ),
+        min_entropy=1.5,
+        min_length=3,
+        check_entropy=False,
+        false_positive_indicators=[],
+        tags=["password", "oracle", "config"],
+        fast_keywords=["password"],
+    ))
+
+    # ── 14.32 Generic --password-file / --passfile / -password-file ─────
+    # Doesn't extract a secret — just flags the form for triage. Useful
+    # because the named file is a guaranteed credential leak.
+    rules.append(Rule(
+        id="PASSWORD_FILE_FLAG",
+        name="--password-file / --passfile flag (review the referenced file)",
+        category=Category.PASSWORD,
+        severity=Severity.MEDIUM,
+        description="CLI flag pointing at a password file (rsync, wpa_supplicant, mysql, etc.) — referenced file likely holds the secret",
+        pattern=re.compile(
+            r'(?i)(?:--?password[-_]?file|--?passfile|--?creds?[-_]?file)'
+            r'[=\s]+(?P<secret>\S{2,})',
+        ),
+        min_entropy=0.0,
+        min_length=2,
+        check_entropy=False,
+        tags=["password", "command", "indirect"],
+        fast_keywords=["password-file", "password_file", "passfile",
+                       "creds-file", "creds_file"],
+    ))
+
+    # ── 14.33 Kubernetes Secret stringData: (plaintext) ─────────────────
+    # Sister rule to K8S_SECRET (which catches base64 `data:`). stringData is
+    # plaintext and far more likely to leak real creds.
+    rules.append(Rule(
+        id="K8S_STRINGDATA_SECRET",
+        name="Kubernetes Secret stringData (plaintext)",
+        category=Category.PASSWORD,
+        severity=Severity.CRITICAL,
+        description="Plaintext value under `stringData:` in a Kubernetes Secret manifest",
+        pattern=re.compile(
+            r'(?im)^\s+(?P<keyname>[\w.-]*'
+            r'(?:password|passwd|pwd|secret|token|credential|api[_-]?key|'
+            r'access[_-]?key)'
+            r'[\w.-]*)'
+            r'\s*:\s*["\']?(?P<secret>[^"\'\s#]{3,})["\']?'
+            r'\s*(?:\s+#[^\n]*)?\s*$',
+        ),
+        min_entropy=1.5,
+        min_length=3,
+        context_keywords=["stringData", "kind: Secret", "apiVersion"],
+        tags=["password", "kubernetes", "k8s"],
+        fast_keywords=["password", "passwd", "pwd", "secret", "token",
+                       "credential", "api_key", "apikey", "access_key"],
+    ))
+
+    # ── 14.34 mount.cifs/nfs `credentials=<file>` reference ─────────────
+    rules.append(Rule(
+        id="MOUNT_CREDENTIALS_FILE",
+        name="mount credentials= reference",
+        category=Category.PASSWORD,
+        severity=Severity.MEDIUM,
+        description="mount option pointing at a credentials file (likely contains user=…/password=…)",
+        pattern=re.compile(
+            r'(?i)(?:^|\s,?)credentials\s*=\s*'
+            r'(?P<secret>/[^\s,#"\']+)',
+        ),
+        min_entropy=0.0,
+        min_length=4,
+        check_entropy=False,
+        context_keywords=["mount", "cifs", "smb", "fstab"],
+        tags=["password", "linux", "mount", "indirect"],
+        fast_keywords=["credentials="],
+    ))
+
+    # ── 14.35 PowerShell here-string $pwd = @"...\n...\n"@ ──────────────
+    # Pattern catches `$pass = @"\n<plaintext>\n"@` blocks. Not common but
+    # used by attackers to embed creds in payloads.
+    rules.append(Rule(
+        id="POWERSHELL_HERESTRING_PASSWORD",
+        name="PowerShell here-string password",
+        category=Category.PASSWORD,
+        severity=Severity.HIGH,
+        description="PowerShell here-string `@\"...\"@` assigned to a password variable",
+        pattern=re.compile(
+            r'(?is)\$(?P<varname>[\w]*'
+            r'(?:pass(?:word|wd|phrase)?|pwd|secret|credential)[\w]*)'
+            r'\s*=\s*@"\s*\n(?P<secret>[^\n]{3,}?)\n"@',
+        ),
+        min_entropy=1.5,
+        min_length=3,
+        tags=["password", "powershell", "windows"],
+        fast_keywords=["@\""],
+        multiline=True,
     ))
 
     # Generic "the password is X" / "password = X" comment pattern (CTF clue)
