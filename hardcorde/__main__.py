@@ -24,6 +24,22 @@ import platform
 import sys
 import threading
 
+# Windows console defaults to cp1252, which can't encode the box-drawing
+# and other non-ASCII glyphs the reporter emits. Force UTF-8 with a safe
+# fallback so we never crash on encode errors. Python 3.7+ supports this
+# on TextIOWrapper; guarded for any oddball stream replacements.
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        pass
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+    except Exception:
+        pass
+
 try:
     from . import __version__
     from .engine import EngineConfig, run_scan, SEVERITY_RANK
