@@ -1,12 +1,14 @@
 """
-hardcorde - High-confidence credential discovery for authorized penetration tests.
+hardcorde — Hardcoded password discovery for authorized penetration tests.
 
-Recursively scans filesystems for hardcoded credentials, API keys, tokens,
-connection strings, and other secrets with contextual analysis, entropy scoring,
-and false-positive reduction.
+Scope: passwords and password+username pairs only. Does NOT scan for API
+keys, OAuth tokens, JWTs, PEM private keys, generic high-entropy secrets,
+credential-store files, or filename heuristics — by design, to keep noise
+low and signal high.
 
-For use in authorized internal penetration tests and legal lab environments only.
+For authorized internal penetration tests, red-team engagements, CTF, and
+lab environments only.
 """
 
-__version__ = "1.1.0"
+__version__ = "2.0.0"
 __author__ = "hardcorde"

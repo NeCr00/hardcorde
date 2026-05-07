@@ -1,21 +1,18 @@
 """
 CLI entry point for hardcorde.
 
-A credential-discovery tool for authorized penetration tests, internal
-audits, and red-team engagements. On launch:
-
-  - Auto-detects the host OS (Windows / Linux), or honors --os.
-  - Runs all default checks for that OS unless they're disabled with
-    a matching --no-* flag.
-  - When a TARGET_PATH is supplied, also recurses through it.
-  - Emits findings to text / JSON / CSV / SARIF.
+A focused tool for finding hardcoded **passwords** and password+username
+pairs in source, configs, scripts, and OS-default credential locations.
+By design it does NOT search for API keys, OAuth tokens, JWTs, PEM private
+keys, generic high-entropy secrets, or vault files — that's what generic
+secret scanners do, and they generate too much noise on real engagements.
 
 Usage:
-    credfinder                              # auto-detect, scan OS defaults
-    credfinder /home                        # + recurse /home
-    credfinder C:\\Users --os windows
-    credfinder /etc --no-cred-stores --no-filename-patterns
-    credfinder . -f sarif -o findings.sarif
+    hardcorde                              # auto-detect OS, scan defaults
+    hardcorde /home                        # + recurse /home
+    hardcorde C:\\Users --os windows
+    hardcorde /etc --no-linux-common
+    hardcorde . -f sarif -o out.sarif
 """
 
 import argparse
@@ -24,10 +21,8 @@ import platform
 import sys
 import threading
 
-# Windows console defaults to cp1252, which can't encode the box-drawing
-# and other non-ASCII glyphs the reporter emits. Force UTF-8 with a safe
-# fallback so we never crash on encode errors. Python 3.7+ supports this
-# on TextIOWrapper; guarded for any oddball stream replacements.
+# Force UTF-8 on the Windows console so the box-drawing glyphs in the
+# banner / progress bar don't crash with cp1252 encode errors.
 if sys.platform == "win32":
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -52,9 +47,6 @@ try:
         get_windows_common_paths, get_linux_common_paths,
         resolve_common_paths, ScanTarget,
     )
-    from .cred_stores import (
-        discover_cred_stores, discover_filename_patterns, hit_to_finding,
-    )
 except ImportError:
     from hardcorde import __version__
     from hardcorde.engine import EngineConfig, run_scan, SEVERITY_RANK
@@ -67,9 +59,6 @@ except ImportError:
         get_windows_common_paths, get_linux_common_paths,
         resolve_common_paths, ScanTarget,
     )
-    from hardcorde.cred_stores import (
-        discover_cred_stores, discover_filename_patterns, hit_to_finding,
-    )
 
 
 # ── OS detection ─────────────────────────────────────────────────────
@@ -78,16 +67,14 @@ def detect_os(override: str = "auto") -> str:
     """
     Resolve the OS for default-check selection.
     Returns one of: "windows", "linux".
-
-    macOS maps to "linux" because the Linux defaults (dotfiles, /etc,
-    SSH keys, shell history) cover the same ground on Darwin.
+    macOS and other Unix-likes map to "linux" (the dotfile / /etc layout
+    is the same).
     """
     if override and override != "auto":
         return override
     s = platform.system().lower()
     if s == "windows":
         return "windows"
-    # linux, darwin, freebsd, etc → use the linux check set
     return "linux"
 
 
@@ -110,16 +97,8 @@ def _init_windows_ansi():
 
 # ── Argument parser ──────────────────────────────────────────────────
 
-def _add_bool_flag(parser, name: str, default: bool, help_on: str, help_off: str = None):
-    """
-    Add a paired --foo / --no-foo flag with a single dest.
-    The default is `default`; the user can flip it either way.
-
-    Note: both add_argument calls explicitly set `default=default`. Without
-    that, the second call (`store_false`) would silently set the implicit
-    default to True, clobbering a default=False from the first call when
-    only one of the flags is used in an argparse group.
-    """
+def _add_bool_flag(parser, name: str, default: bool, help_on: str):
+    """Paired --foo / --no-foo flag with a single dest."""
     dest = name.replace("-", "_")
     grp = parser.add_mutually_exclusive_group()
     grp.add_argument(
@@ -128,20 +107,19 @@ def _add_bool_flag(parser, name: str, default: bool, help_on: str, help_off: str
     )
     grp.add_argument(
         f"--no-{name}", dest=dest, action="store_false", default=default,
-        help=help_off or f"disable: {help_on.lower()}",
+        help=f"disable: {help_on.lower()}",
     )
 
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="credfinder",
+        prog="hardcorde",
         description=(
-            "HARDCORDE v{ver} — credential discovery for authorized\n"
-            "penetration tests, internal audits, and red-team engagements.\n"
-            "\n"
-            "Detects hardcoded passwords, API keys, tokens, connection\n"
-            "strings, password-manager databases, and credential-suggestive\n"
-            "filenames on Windows and Linux."
+            "HARDCORDE v{ver} — hardcoded password discovery for authorized\n"
+            "penetration tests. Finds passwords and password+username pairs\n"
+            "in source code, configs, scripts, and OS-default credential\n"
+            "locations on Windows and Linux. Does NOT scan for API keys,\n"
+            "tokens, JWTs, or PEM private keys."
         ).format(ver=__version__),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
@@ -149,10 +127,9 @@ Examples:
   %(prog)s                              auto-detect OS, scan defaults
   %(prog)s /home                        + recurse /home
   %(prog)s C:\\Users --os windows
-  %(prog)s /etc --no-cred-stores
+  %(prog)s /etc --no-linux-common       only scan /etc, skip OS sweep
   %(prog)s . -f sarif -o report.sarif
-  %(prog)s /var/www --add-ext .erb,.go
-  %(prog)s /opt --ext .env,.yml,.json   only these extensions
+  %(prog)s /opt --severity high -q      high+ only, quiet
 """,
     )
 
@@ -160,113 +137,75 @@ Examples:
     p.add_argument(
         "target", nargs="?", metavar="TARGET_PATH", default=None,
         help="Optional root directory to recurse into (e.g. C:\\Users, /home). "
-             "If omitted, only the OS-default-location checks run.",
+             "If omitted, only the OS-default-location sweep runs.",
     )
 
-    # ── OS / scope ──
+    # ── Scope ──
     scope = p.add_argument_group("scope")
     scope.add_argument(
         "--os", choices=["windows", "linux", "auto"], default="auto",
         help="Override OS detection (default: auto).",
     )
-
-    # ── Default checks (paired --foo / --no-foo) ──
-    checks = p.add_argument_group(
-        "default checks (all on; disable with the matching --no-* flag)"
-    )
-    # OS-default-location checks: each is ON by default but only fires
-    # when the resolved OS matches. The handler enforces that.
-    _add_bool_flag(checks, "win-common", True,
-                   "scan well-known Windows credential locations (registry "
-                   "exports, unattend, IIS, .aws, PSReadLine, etc.)")
-    _add_bool_flag(checks, "linux-common", True,
-                   "scan well-known Linux credential locations (dotfiles, "
-                   "/etc, SSH keys, shell history, /var/www, etc.)")
-    _add_bool_flag(checks, "scan-target", True,
-                   "recursive content scan of TARGET_PATH (active only when "
-                   "TARGET_PATH is provided)")
-    _add_bool_flag(checks, "cred-stores", True,
-                   "discover password-manager / vault files by extension "
-                   "(.kdbx, .psafe3, .agilekeychain, .keychain, …)")
-    _add_bool_flag(checks, "filename-patterns", True,
-                   "flag files whose name suggests credentials (password, "
-                   "secret, id_rsa, htpasswd, …)")
+    _add_bool_flag(scope, "win-common", True,
+                   "scan well-known Windows password locations (registry "
+                   "exports, unattend, IIS, .aws, PSReadLine, PuTTY/WinSCP, "
+                   "SYSVOL/GPP, …)")
+    _add_bool_flag(scope, "linux-common", True,
+                   "scan well-known Linux password locations (shadow, "
+                   "sudoers, .pgpass, .netrc, .my.cnf, shell history, "
+                   "/etc, /var/www, web/auth-server configs, …)")
+    _add_bool_flag(scope, "scan-target", True,
+                   "recursive content scan of TARGET_PATH (active only "
+                   "when TARGET_PATH is provided)")
 
     # ── Output ──
-    out = p.add_argument_group("output options")
+    out = p.add_argument_group("output")
     out.add_argument(
         "-f", "--format",
         choices=["text", "terminal", "json", "csv", "sarif", "html"],
         default="text",
-        help="Output format. 'text' (alias 'terminal') is the default; "
-             "'sarif' produces SARIF 2.1.0 for security pipelines.",
-    )
+        help="Output format (default: text).")
     out.add_argument(
         "-o", "--output", metavar="FILE",
-        help="Write output to FILE instead of stdout.",
-    )
-    out.add_argument("--no-color", action="store_true", help="Disable colored output.")
+        help="Write output to FILE instead of stdout.")
+    out.add_argument("--no-color", action="store_true",
+                     help="Disable ANSI colors.")
     out.add_argument("--no-context", action="store_true",
-                     help="Hide context lines around findings.")
+                     help="Hide surrounding context lines.")
     out.add_argument("-q", "--quiet", action="store_true",
                      help="Suppress progress output.")
     out.add_argument("-v", "--verbose", action="store_true",
                      help="Show confidence-score breakdown for each finding.")
 
     # ── Filtering ──
-    filt = p.add_argument_group("filtering options")
+    filt = p.add_argument_group("filtering")
     filt.add_argument("--min-confidence", type=int, default=25, metavar="N",
-                      help="Minimum confidence to report (0-100, default: 25).")
+                      help="Minimum confidence (0-100, default: 25).")
     filt.add_argument(
         "--severity", default="info",
         choices=["critical", "high", "medium", "low", "info"],
         help="Minimum severity to report (default: info).")
-    filt.add_argument("--category", nargs="+", metavar="CAT",
-                      help="Only report these categories (password, api_key, "
-                           "token, …).")
-    filt.add_argument("--tags", nargs="+", metavar="TAG",
-                      help="Only run rules with these tags.")
-    filt.add_argument("--rules", nargs="+", metavar="ID",
-                      help="Only run these rule IDs.")
-    filt.add_argument("--exclude-rules", nargs="+", metavar="ID",
-                      help="Exclude these rule IDs.")
-    filt.add_argument(
-        "--passwords-only", action="store_true",
-        help="Restrict scanning to actual hardcoded passwords (and password "
-             "hashes / connection strings with embedded passwords). Skips API "
-             "keys, OAuth tokens, JWTs, bearer tokens, PEM private keys, "
-             "generic high-entropy secrets, and credential-store / filename "
-             "discovery — exactly what a pentester wants when they only care "
-             "about password material.")
 
     # ── Tuning ──
-    tune = p.add_argument_group("tuning options")
+    tune = p.add_argument_group("tuning")
     tune.add_argument(
         "--max-size", type=int, default=10 * 1024 * 1024, metavar="BYTES",
-        help="Skip files larger than this (default: 10485760 = 10 MB).")
+        help="Skip files larger than this (default: 10 MB).")
+    tune.add_argument(
+        "--max-depth", type=int, default=50, metavar="N",
+        help="Maximum directory recursion depth (default: 50).")
     tune.add_argument(
         "--include-binary", action="store_true",
-        help="Include binary files in content scanning (default: skip).")
+        help="Include binary files in content scanning.")
     tune.add_argument(
         "--ext", metavar="LIST",
         help="Override the default extension allowlist for content scanning. "
              "Comma- or space-separated, e.g. '.env,.yml,.json'.")
     tune.add_argument(
         "--add-ext", metavar="LIST",
-        help="Extend the default extension allowlist. Same syntax as --ext.")
-    tune.add_argument(
-        "--max-depth", type=int, default=50, metavar="N",
-        help="Maximum directory recursion depth (default: 50).")
-    tune.add_argument("--follow-symlinks", action="store_true",
-                      help="Follow symbolic links.")
-    tune.add_argument("--high-value-only", action="store_true",
-                      help="Only scan files with high-value extensions/names.")
+        help="Extend the default extension allowlist.")
     tune.add_argument("--skip-dirs", nargs="+", metavar="DIR", default=[],
                       help="Additional directory names to skip.")
-    tune.add_argument("--skip-ext", nargs="+", metavar="EXT", default=[],
-                      help="Additional extensions to skip (e.g. .log .tmp).")
-    tune.add_argument("--include-dirs", nargs="+", metavar="DIR", default=[],
-                      help="Override the built-in skip list for these dirs.")
     tune.add_argument("-t", "--threads", type=int, default=4, metavar="N",
                       help="Concurrent scanner workers (default: 4).")
 
@@ -281,7 +220,7 @@ Examples:
 # ── List rules helper ────────────────────────────────────────────────
 
 def _list_rules():
-    """Print all available detection rules."""
+    """Print all available password detection rules."""
     try:
         from .rules import ALL_RULES
     except ImportError:
@@ -294,15 +233,15 @@ def _list_rules():
         "low":      Colors.CYAN,
         "info":     Colors.GRAY,
     }
-    print(f"\n{'ID':<45} {'SEVERITY':<12} {'CATEGORY':<22} TAGS")
-    print("-" * 110)
+    print(f"\n{'ID':<45} {'SEVERITY':<12} TAGS")
+    print("-" * 100)
     for r in sorted(ALL_RULES, key=lambda x: (SEVERITY_RANK.get(x.severity.value, 4), x.id)):
         sev = r.severity.value
         sev_display = _c(sev_colors.get(sev, ""), sev.upper(), use_color)
         tags = ", ".join(r.tags) if r.tags else ""
         padding = " " * (12 - len(sev))
-        print(f"  {r.id:<43} {sev_display}{padding} {r.category.value:<22} {tags}")
-    print(f"\nTotal: {len(ALL_RULES)} rules\n")
+        print(f"  {r.id:<43} {sev_display}{padding} {tags}")
+    print(f"\nTotal: {len(ALL_RULES)} password rules\n")
 
 
 def _progress_printer(quiet: bool, use_color: bool):
@@ -329,10 +268,8 @@ def _progress_printer(quiet: bool, use_color: bool):
     return callback
 
 
-# ── Helpers for --ext / --add-ext parsing ────────────────────────────
-
 def _parse_ext_list(raw: str) -> frozenset[str]:
-    """Parse '.env,.yml .json' → {'.env', '.yml', '.json'} (lowercased, dot-prefixed)."""
+    """Parse '.env,.yml .json' → {'.env', '.yml', '.json'}."""
     if not raw:
         return frozenset()
     out = set()
@@ -357,38 +294,27 @@ def main(argv: list[str] = None) -> int:
         _list_rules()
         return 0
 
-    # Validate target
     if args.target and not os.path.exists(args.target):
         print(f"Error: path does not exist: {args.target}", file=sys.stderr)
         return 1
 
     use_color = not args.no_color and _supports_color()
-    # Translate "terminal" → "text" without breaking older invocations
     fmt = "text" if args.format == "terminal" else args.format
 
-    # Resolve OS
     target_os = detect_os(args.os)
 
-    # Decide which OS-default-location check actually runs.
-    # The check is gated on BOTH the --(no-)*-common flag AND the
-    # active OS — we never run Linux defaults on a Windows host
-    # unless the user explicitly --os linux + --linux-common.
+    # OS-default sweeps are gated on BOTH the flag and the active OS.
     do_win_common = args.win_common and target_os == "windows"
     do_linux_common = args.linux_common and target_os == "linux"
-
     do_target = args.scan_target and bool(args.target)
-    do_cred_stores = args.cred_stores
-    do_filename_patterns = args.filename_patterns
 
-    # If the user disabled literally everything, bail with a clear msg
-    if not any([do_win_common, do_linux_common, do_target,
-                do_cred_stores, do_filename_patterns]):
+    if not (do_win_common or do_linux_common or do_target):
         parser.error(
-            "all checks are disabled — nothing to do. Pass a TARGET_PATH "
-            "or re-enable at least one check."
+            "nothing to scan — pass a TARGET_PATH or re-enable an "
+            "OS-default sweep (--win-common / --linux-common)."
         )
 
-    # Banner (only for the human-facing format)
+    # Banner (only for the human-facing format, no --output redirect)
     if not args.quiet and fmt == "text" and not args.output:
         sys.stderr.write(_c(Colors.BOLD + Colors.CYAN, """
   ██╗  ██╗ █████╗ ██████╗ ██████╗  ██████╗ ██████╗ ██████╗ ██████╗ ███████╗
@@ -400,41 +326,21 @@ def main(argv: list[str] = None) -> int:
 """, use_color))
         sys.stderr.write(_c(
             Colors.DIM,
-            f"  v{__version__} — Credential Discovery for Authorized Assessments\n"
-            f"  OS: {target_os} (detected={detect_os('auto')}"
-            f"{', user-overridden' if args.os != 'auto' else ''})\n\n",
+            f"  v{__version__} — Hardcoded Password Discovery (passwords only)\n"
+            f"  OS: {target_os}"
+            f"{' (user-overridden)' if args.os != 'auto' else ''}\n\n",
             use_color,
         ))
-        # Brief summary of which checks are active
-        active = []
-        if do_win_common:        active.append("win-common")
-        if do_linux_common:      active.append("linux-common")
-        if do_target:            active.append(f"scan-target={args.target}")
-        if do_cred_stores:       active.append("cred-stores")
-        if do_filename_patterns: active.append("filename-patterns")
-        sys.stderr.write(_c(Colors.DIM, f"  Active checks: {', '.join(active)}\n", use_color))
-        if args.passwords_only:
-            sys.stderr.write(_c(
-                Colors.DIM,
-                "  Mode: --passwords-only (skipping API keys, tokens, JWTs, "
-                "PEM keys, env-secrets, cred-store / filename discovery)\n",
-                use_color,
-            ))
-        sys.stderr.write("\n")
 
-    # ── Build base scan config ───────────────────────────────────────
+    # ── Build scan config ────────────────────────────────────────────
     ext_override = _parse_ext_list(args.ext) if args.ext else frozenset()
     ext_extra    = _parse_ext_list(args.add_ext) if args.add_ext else frozenset()
 
     base_scan_config = ScanConfig(
         max_file_size=args.max_size,
         max_depth=args.max_depth,
-        follow_symlinks=args.follow_symlinks,
+        follow_symlinks=False,
         extra_skip_dirs=args.skip_dirs,
-        extra_skip_extensions=[e if e.startswith(".") else f".{e}"
-                               for e in args.skip_ext],
-        include_dirs=args.include_dirs,
-        only_high_value=args.high_value_only,
         include_binary=args.include_binary,
         ext_override=ext_override,
         ext_extra=ext_extra,
@@ -444,36 +350,22 @@ def main(argv: list[str] = None) -> int:
         scan_config=base_scan_config,
         min_confidence=args.min_confidence,
         threads=args.threads,
-        rule_ids=args.rules,
-        exclude_rules=args.exclude_rules,
-        categories=args.category,
-        tags=args.tags,
         severity_min=args.severity,
-        passwords_only=args.passwords_only,
     )
-
-    # --passwords-only also disables cred-store / filename-pattern discovery:
-    # those flag *files* that *might* hold credentials, not actual hardcoded
-    # password content. The user asked for actual passwords only.
-    if args.passwords_only:
-        do_cred_stores = False
-        do_filename_patterns = False
 
     progress = _progress_printer(args.quiet, use_color)
 
     all_findings = []
     total_files = 0
     scanned_roots: set[str] = set()
-    cred_store_roots: list[str] = []
 
-    # ── Phase 1: User TARGET_PATH ─────────────────────────────────────
+    # ── Phase 1: explicit TARGET_PATH ────────────────────────────────
     if do_target:
         abspath = os.path.abspath(args.target)
         scanned_roots.add(abspath)
-        cred_store_roots.append(abspath)
 
         if not args.quiet:
-            sys.stderr.write(f"  [scan-target] Scanning: {abspath}\n")
+            sys.stderr.write(f"  [scan-target] {abspath}\n")
 
         findings, stats = run_scan(args.target, base_engine_config,
                                    progress_callback=progress)
@@ -488,7 +380,7 @@ def main(argv: list[str] = None) -> int:
                 f"{stats.elapsed_seconds:.1f}s\n"
             )
 
-    # ── Phase 2: OS-default credential locations ─────────────────────
+    # ── Phase 2: OS-default password locations ───────────────────────
     common_targets: list[ScanTarget] = []
     if do_win_common:
         common_targets.extend(get_windows_common_paths())
@@ -497,14 +389,10 @@ def main(argv: list[str] = None) -> int:
 
     if common_targets:
         resolved = resolve_common_paths(common_targets)
-
         if not args.quiet and resolved:
-            label = []
-            if do_win_common:   label.append("Windows")
-            if do_linux_common: label.append("Linux")
+            label = "Windows" if do_win_common else "Linux"
             sys.stderr.write(
-                f"  [common] {' + '.join(label)}: "
-                f"{len(resolved)} paths matched\n"
+                f"  [common] {label}: {len(resolved)} paths matched\n"
             )
 
         for path, target in resolved:
@@ -513,15 +401,12 @@ def main(argv: list[str] = None) -> int:
             if any(path.startswith(s + os.sep) or path == s for s in scanned_roots):
                 continue
             scanned_roots.add(path)
-            cred_store_roots.append(path)
 
             target_scan_config = ScanConfig(
                 max_file_size=base_scan_config.max_file_size,
                 max_depth=target.max_depth,
                 follow_symlinks=False,
                 extra_skip_dirs=base_scan_config.extra_skip_dirs,
-                extra_skip_extensions=list(base_scan_config.extra_skip_extensions),
-                include_dirs=list(base_scan_config.include_dirs),
                 only_high_value=target.high_value_only,
                 include_binary=base_scan_config.include_binary,
                 ext_override=base_scan_config.ext_override,
@@ -531,76 +416,16 @@ def main(argv: list[str] = None) -> int:
                 scan_config=target_scan_config,
                 min_confidence=base_engine_config.min_confidence,
                 threads=base_engine_config.threads,
-                rule_ids=base_engine_config.rule_ids,
-                exclude_rules=base_engine_config.exclude_rules,
-                categories=base_engine_config.categories,
-                tags=base_engine_config.tags,
                 severity_min=base_engine_config.severity_min,
-                passwords_only=base_engine_config.passwords_only,
             )
 
             if not args.quiet:
-                display = path
-                if len(display) > 55:
-                    display = "..." + display[-52:]
+                display = path if len(path) <= 55 else "..." + path[-52:]
                 sys.stderr.write(f"  [{target.category}] {display}\n")
 
             findings, stats = run_scan(path, target_engine_config, progress_callback=None)
             all_findings.extend(findings)
             total_files += stats.files_scanned
-
-    # ── Phase 3: Credential-store file discovery ─────────────────────
-    # Scopes:
-    #   - explicit TARGET_PATH (if any)
-    #   - resolved OS-default roots (if any)
-    if do_cred_stores and cred_store_roots:
-        if not args.quiet:
-            sys.stderr.write(f"  [cred-stores] scanning {len(cred_store_roots)} root(s) "
-                             f"for password-manager files\n")
-        store_hits = discover_cred_stores(
-            cred_store_roots,
-            max_depth=args.max_depth,
-            follow_symlinks=args.follow_symlinks,
-            extra_skip_dirs=args.skip_dirs,
-        )
-        if not args.quiet and store_hits:
-            sys.stderr.write(f"             {len(store_hits)} store file(s) found\n")
-        for hit in store_hits:
-            all_findings.append(hit_to_finding(hit))
-
-    # ── Phase 4: Suspicious filename-pattern discovery ───────────────
-    if do_filename_patterns and cred_store_roots:
-        if not args.quiet:
-            sys.stderr.write(
-                f"  [filename-patterns] scanning {len(cred_store_roots)} root(s) "
-                "for credential-suggestive filenames\n"
-            )
-        # Dedup: don't double-flag a file that's already a cred-store hit.
-        already = {f.file_path for f in all_findings if f.rule_id == "CRED_STORE_FILE"}
-        name_hits = discover_filename_patterns(
-            cred_store_roots,
-            max_depth=args.max_depth,
-            follow_symlinks=args.follow_symlinks,
-            max_size=args.max_size,
-            include_binary=args.include_binary,
-            extra_skip_dirs=args.skip_dirs,
-        )
-        kept = [h for h in name_hits if h.path not in already]
-        if not args.quiet and kept:
-            sys.stderr.write(f"                       {len(kept)} filename match(es)\n")
-        for hit in kept:
-            all_findings.append(hit_to_finding(hit))
-
-    # Apply --severity filter uniformly across ALL findings.
-    # The engine already drops sub-threshold rules in --scan-target, but
-    # cred-store and filename-pattern findings bypass the engine — they need
-    # filtering here so a `--severity high` run doesn't surface medium-severity
-    # filename matches.
-    sev_max_rank = SEVERITY_RANK.get(args.severity, 4)
-    all_findings = [
-        f for f in all_findings
-        if SEVERITY_RANK.get(f.severity, 4) <= sev_max_rank
-    ]
 
     # Final ordering: severity then confidence
     all_findings.sort(

@@ -787,7 +787,7 @@ def _build_rules() -> list[Rule]:
         ),
         min_entropy=1.5,
         context_keywords=["database", "db", "connection", "dsn", "uri", "url"],
-        tags=["database", "connection_string"],
+        tags=["password", "database", "connection_string"],
         fast_keywords=["://"],
     ))
 
@@ -804,7 +804,7 @@ def _build_rules() -> list[Rule]:
         ),
         min_entropy=2.0,
         context_keywords=["jdbc", "database", "connection"],
-        tags=["database", "jdbc"],
+        tags=["password", "database", "jdbc"],
         fast_keywords=["jdbc:"],
     ))
 
@@ -820,7 +820,7 @@ def _build_rules() -> list[Rule]:
             r'(?P<secret>[^"\';\n]*(?:password|pwd)\s*=[^"\';\n]+)',
         ),
         min_entropy=1.5,
-        tags=["connection_string"],
+        tags=["password", "connection_string"],
         fast_keywords=["connection", "dsn", "data source"],
     ))
 
@@ -3311,14 +3311,33 @@ def _build_rules() -> list[Rule]:
     return rules
 
 
-# Singleton rule set
-ALL_RULES: list[Rule] = _build_rules()
+def _is_password_rule(rule: Rule) -> bool:
+    """
+    The tool is intentionally scoped to *password material only*. We keep:
 
-def get_rules_by_category(category: Category) -> list[Rule]:
-    return [r for r in ALL_RULES if r.category == category]
+      - Category.PASSWORD               — direct password assignments
+      - Category.HASH                   — password hashes (shadow, NTLM,
+                                          htpasswd, LDIF userPassword) —
+                                          passwords-at-rest
+      - rules tagged with "password"    — connection strings carrying
+                                          user:password pairs
+
+    Everything else (API keys, OAuth tokens, JWTs, PEM private keys,
+    cloud-vendor keys, generic high-entropy secrets, env-secret blobs,
+    credential-store files, filename heuristics) is dropped at load
+    time so the engine never even compiles the regex.
+    """
+    if rule.category.value in {"password", "hash"}:
+        return True
+    if "password" in rule.tags:
+        return True
+    return False
+
+
+# Singleton rule set — passwords only.
+_ALL_BUILT: list[Rule] = _build_rules()
+ALL_RULES: list[Rule] = [r for r in _ALL_BUILT if _is_password_rule(r)]
+
 
 def get_rules_by_severity(severity: Severity) -> list[Rule]:
     return [r for r in ALL_RULES if r.severity == severity]
-
-def get_rules_by_tag(tag: str) -> list[Rule]:
-    return [r for r in ALL_RULES if tag in r.tags]
